@@ -57,7 +57,7 @@ Tasks are stored in SQLite (`data/debeloglav.db`) and survive restarts. Recurrin
 ## How it works
 
 - `debeloglav/agent.py`: the agent. `agents.Agent(model="mistral-large-4", tools=[web_search, ...])`. The `web_search` tool calls Mistral's hosted `web_search` through the Conversations API (the pattern the Agents SDK docs recommend) and returns a summary with source URLs. The agent answers in plain text; the sources its searches found are recorded by the tool and listed under the reply.
-- `debeloglav/agent.py` also has `generate_image`, which calls the hosted `image_generation` tool and returns file ids. The tool records the file ids, and the bot downloads and attaches them.
+- `debeloglav/agent.py` also has `generate_image`, which calls the hosted `image_generation` tool, downloads the image from the URL the tool returns, and records the bytes. The bot attaches them to the reply.
 - `debeloglav/agent.py` also has the memory, scheduling and research tools, and the research agent (`build_research_agent`) with its `researcher` subagent.
 - `debeloglav/media.py`: Voxtral transcription, and ffmpeg frame and audio extraction for videos.
 - `debeloglav/scheduler.py`: the loop that runs due tasks. `debeloglav/store.py`: SQLite for memories and tasks.

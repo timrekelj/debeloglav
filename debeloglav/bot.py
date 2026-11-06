@@ -19,7 +19,6 @@ from .agent import (
     NO_REPLY,
     build_agent,
     build_research_agent,
-    download_file,
     memory_prompt,
     style_prompt,
 )
@@ -538,13 +537,10 @@ async def render(
         return "Hmm, tole mi pa ni uspelo. Poskusi znova.", []
 
     files: list[discord.File] = []
-    for i, file_id in enumerate(dict.fromkeys(reply.found.images)):
-        try:
-            data = await download_file(file_id)
-        except Exception:
-            log.exception("Could not download generated image %s", file_id)
-            continue
-        files.append(discord.File(io.BytesIO(data), filename=f"debeloglav_{i + 1}.png"))
+    for i, image in enumerate(reply.found.images):
+        # Generated images are JPEG; anything else is kept as PNG.
+        suffix = ".jpg" if image.data[:2] == b"\xff\xd8" else ".png"
+        files.append(discord.File(io.BytesIO(image.data), filename=f"debeloglav_{i + 1}{suffix}"))
 
     text = guard.cap(guard.trim_runaway(reply.text), max_chars)
     if not text and not files:

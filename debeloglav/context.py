@@ -38,25 +38,32 @@ catch_up: Callable[..., Awaitable[dict[str, object]]] | None = None
 
 
 @dataclass
+class FoundImage:
+    """An image a tool produced, for the bot to attach to the reply."""
+
+    data: bytes
+
+
+@dataclass
 class Found:
     """What the tools of one turn found, for the bot to attach to the reply."""
 
     sources: dict[str, str] = field(default_factory=dict)  # url -> title
-    images: list[str] = field(default_factory=list)  # generated file ids
+    images: list[FoundImage] = field(default_factory=list)  # generated images, as bytes
 
 
 _found: dict[str, Found] = {}
 
 
-def record(ctx: agents.ToolCallbackContext, *, sources: dict[str, str] | None = None, image: str | None = None) -> None:
+def record(ctx: agents.ToolCallbackContext, *, sources: dict[str, str] | None = None, image: bytes | None = None) -> None:
     """Note sources or a generated image for the conversation's current turn."""
     if ctx.session.id not in _requests:
         return  # a session the bot does not post from, such as a research subagent
     found = _found.setdefault(ctx.session.id, Found())
     for url, title in (sources or {}).items():
         found.sources.setdefault(url, title)
-    if image:
-        found.images.append(image)
+    if image is not None:
+        found.images.append(FoundImage(data=image))
 
 
 def take_found(session_id: str) -> Found:
