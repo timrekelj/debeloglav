@@ -1,8 +1,14 @@
 """Debeloglav's brain: a Mistral agent that researches on the web before it answers."""
 
+import base64
+import json
+import logging
 import os
+import re
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
+import aiohttp
 from mistralai import agents
 from mistralai.client import Mistral
 from mistralai.client import models as api_models
@@ -24,6 +30,8 @@ client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
 NO_REPLY = "NO_REPLY"
 
 QUIET = agents.Builtins(skills=False, subagents=False, programmatic_tool_calling=False)
+
+log = logging.getLogger("debeloglav")
 
 
 # --- Web ---------------------------------------------------------------------------------------
@@ -59,34 +67,237 @@ async def web_search(ctx: agents.ToolCallbackContext, /, query: str) -> dict[str
     }
 
 
+# --- Images ------------------------------------------------------------------------------------
+
+
+GENERATE_INSTRUCTIONS = "Use the image generation tool to create exactly the image described. Do not ask questions."
+EDIT_INSTRUCTIONS = (
+    "Call the image_generation tool ONCE with image_url set to EXACTLY the URL in the user's text, "
+    "copied verbatim (do not substitute another URL), and prompt = the edit requested. Do not ask questions."
+)
+IMG_URL_RE = re.compile(r"https?://[^\s)\]\"'`}]+", re.IGNORECASE)
+
+
 @agents.tool(model_access="direct")
 async def generate_image(ctx: agents.ToolCallbackContext, /, prompt: str) -> str:
     """Generate an image from a detailed description. The image is attached to your reply automatically."""
+    images = await _generate_images(prompt)
+    if not images:
+        raise agents.ToolError("The image could not be generated.")
+    for data in images:
+        context.record(ctx, image=data)
+    return "The image is generated and will be attached to your reply."
+
+
+@agents.tool(model_access="direct")
+async def edit_image(ctx: agents.ToolCallbackContext, /, instruction: str, image: int = 1) -> str:
+    """Edit one of the images in this message: change, add or remove something in it.
+    The edited image is attached to your reply automatically.
+
+    instruction: what to change, in English.
+    image: which image to edit, by its number in the "Images you can edit with edit_image" list (1 = the first).
+    """
+    request = context.current(ctx)
+    editable = request.editable_images
+    if not editable:
+        raise agents.ToolError("There is no image in this message to edit.")
+    if not 1 <= image <= len(editable):
+        raise agents.ToolError(
+            f"There is no image #{image} here; this message has: "
+            + ", ".join(f"#{i + 1} {item.label}" for i, item in enumerate(editable))
+        )
+    target = editable[image - 1]
+    for _ in range(2):  # try a real edit twice before falling back to regenerating
+        edited = await _edit_image_once(instruction, target.data)
+        if edited is not None:
+            context.record(ctx, image=edited)
+            return "The image is edited and will be attached to your reply."
+    # The hosted tool would not edit our image: describe it, then generate a new version with the change.
+    description = await _describe_image(target.data)
+    images = await _generate_images(
+        "Recreate this image with the requested change applied.\n"
+        f"Description of the original image: {description}\n"
+        f"Change to apply: {instruction}"
+    )
+    if not images:
+        raise agents.ToolError("The image could not be edited or regenerated.")
+    context.record(ctx, image=images[0], regenerated=True)
+    return (
+        "The image could not be edited, so a new version was generated from a description of it "
+        "and will be attached to your reply. Tell the person it is a new version, not an edit."
+    )
+
+
+async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
+    """One real-edit attempt: upload the image, hand the hosted tool its signed URL, and accept the
+    result only if the tool really edited that URL. Returns the edited bytes, or None."""
+    try:
+        uploaded = await client.files.upload_async(
+            file={"file_name": "image.jpg", "content": data},
+            purpose="image_generation",
+        )
+    except Exception:
+        log.exception("Could not upload the image for editing")
+        return None
+    try:
+        url = (await client.files.get_signed_url_async(file_id=uploaded.id, expiry=24)).url
+        response = await client.beta.conversations.start_async(
+            model=TOOL_MODEL,
+            instructions=EDIT_INSTRUCTIONS,
+            inputs=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Edit the image at this exact URL: {url}\n{instruction}"},
+                        {"type": "image_url", "image_url": url},
+                    ],
+                }
+            ],
+            tools=[{"type": "image_generation"}],
+            store=False,
+        )
+        used = None
+        for entry in _tool_execution_entries(response, "image_generation"):
+            try:
+                arguments = json.loads(entry.arguments) if isinstance(entry.arguments, str) else entry.arguments
+            except ValueError:
+                arguments = None
+            if isinstance(arguments, dict):
+                used = arguments.get("image_url")
+                break
+        if used != url:
+            log.warning("The image edit did not use our signed URL (%r)", used)
+            return None
+        images = await _download_images(_result_image_urls(response))
+        return images[0] if images else None
+    except Exception:
+        log.exception("The image edit failed")
+        return None
+    finally:
+        with suppress(Exception):
+            await client.files.delete_async(file_id=uploaded.id)
+
+
+async def _describe_image(data: bytes) -> str:
+    """A detailed English description of an image, for regenerating it with a change."""
+    response = await client.chat.complete_async(
+        model=MODEL,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Describe this image in detail, in English: the subject, composition, "
+                            "style, colours and lighting. Write it so an image generation model "
+                            "could recreate the image from your description alone."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(data).decode()},
+                    },
+                ],
+            }
+        ],
+    )
+    choice = response.choices[0] if response.choices else None
+    content = getattr(choice.message, "content", None) if choice else None
+    return content if isinstance(content, str) else ""
+
+
+def _tool_execution_entries(response: object, name: str) -> list[api_models.ToolExecutionEntry]:
+    return [
+        entry
+        for entry in response.outputs  # type: ignore[attr-defined]
+        if isinstance(entry, api_models.ToolExecutionEntry) and entry.name == name
+    ]
+
+
+def _result_image_urls(response: object) -> list[str]:
+    """The image URLs the hosted image_generation tool returned in its result, in order."""
+    urls: list[str] = []
+    for entry in _tool_execution_entries(response, "image_generation"):
+        info = getattr(entry, "info", None) or {}
+        result = info.get("result")
+        if not isinstance(result, str):
+            continue
+        try:
+            data = json.loads(result)
+        except ValueError:
+            data = None
+        url = data.get("url") if isinstance(data, dict) else None
+        if isinstance(url, str) and url.startswith("http"):
+            urls.append(url)
+        else:
+            urls.extend(IMG_URL_RE.findall(result))
+    return list(dict.fromkeys(urls))
+
+
+def _message_image_urls(response: object) -> list[str]:
+    """The image URLs in the model's message text (markdown links), in order."""
+    urls: list[str] = []
+    for entry in response.outputs:  # type: ignore[attr-defined]
+        if not isinstance(entry, api_models.MessageOutputEntry):
+            continue
+        if isinstance(entry.content, str):
+            urls.extend(IMG_URL_RE.findall(entry.content))
+            continue
+        for chunk in entry.content:
+            if isinstance(chunk, api_models.TextChunk):
+                urls.extend(IMG_URL_RE.findall(chunk.text))
+    return list(dict.fromkeys(urls))
+
+
+def _tool_file_ids(response: object) -> list[str]:
+    return [
+        chunk.file_id
+        for entry in response.outputs  # type: ignore[attr-defined]
+        if isinstance(entry, api_models.MessageOutputEntry)
+        and not isinstance(entry.content, str)
+        for chunk in entry.content
+        if isinstance(chunk, api_models.ToolFileChunk) and chunk.file_id
+    ]
+
+
+async def _download_images(urls: list[str]) -> list[bytes]:
+    """Download image URLs (they are short-lived signed links) and return the bytes that worked."""
+    images: list[bytes] = []
+    async with aiohttp.ClientSession() as session:
+        for url in urls:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as response:
+                    if response.status == 200:
+                        images.append(await response.read())
+                    else:
+                        log.warning("Image download from %s returned HTTP %s", url, response.status)
+            except Exception:
+                log.exception("Could not download the image from %s", url)
+    return images
+
+
+async def _generate_images(prompt: str, instructions: str = GENERATE_INSTRUCTIONS) -> list[bytes]:
+    """Run the hosted image_generation tool and download what it made."""
     response = await client.beta.conversations.start_async(
         model=TOOL_MODEL,
-        instructions="Use the image generation tool to create exactly the image described. Do not ask questions.",
+        instructions=instructions,
         inputs=prompt,
         tools=[{"type": "image_generation"}],
         store=False,
     )
-    file_ids = [
-        chunk.file_id
-        for entry in response.outputs
-        if isinstance(entry, api_models.MessageOutputEntry)
-        and not isinstance(entry.content, str)
-        for chunk in entry.content
-        if isinstance(chunk, api_models.ToolFileChunk)
-    ]
-    if not file_ids:
-        raise agents.ToolError("The image could not be generated.")
-    for file_id in file_ids:
-        context.record(ctx, image=file_id)
-    return "The image is generated and will be attached to your reply."
-
-
-async def download_file(file_id: str) -> bytes:
-    response = await client.files.download_async(file_id=file_id)
-    return await response.aread()
+    urls = _result_image_urls(response)
+    if urls:
+        return await _download_images(urls)
+    # Older behaviour: the image came back as a file id in a ToolFileChunk.
+    images: list[bytes] = []
+    for file_id in dict.fromkeys(_tool_file_ids(response)):
+        try:
+            download = await client.files.download_async(file_id=file_id)
+            images.append(await download.aread())
+        except Exception:
+            log.exception("Could not download the generated image file %s", file_id)
+    return images or await _download_images(_message_image_urls(response))
 
 
 # --- Memory ------------------------------------------------------------------------------------
@@ -378,6 +589,7 @@ How to behave:
 - If a claim is false or misleading, say so plainly and explain why.
 - People can send you images, voice messages, videos and documents. You see images and sampled video frames directly; voice messages and video sound come to you as transcripts, and documents (PDF, Word, PowerPoint, text and code files) as their text.
 - When someone asks you to draw, generate, create or imagine an image, call generate_image with a detailed English description; the image is attached to your reply automatically. Keep the text answer short then.
+- When someone asks to change, edit or modify an image they sent or replied to ("dodaj mu klobuk", "naredi v anime stilu", "odstrani ozadje"), call edit_image with the image's number from the "Images you can edit with edit_image" list and a detailed English instruction — not generate_image. For a brand new picture, call generate_image. If edit_image reports a new version instead of an edit, say it is a new version, not an edit.
 - People are shown as "Nickname (@username)". Nicknames change; the @username stays the same. Know people by their @username: the same @username is the same person, even under a new nickname. Call people by their current nickname.
 - When you talk about someone, write their nickname as plain text, without @ and without "(@username)".
 - You can't tag or ping anyone: no people, roles, @everyone or @here. If someone asks you to, say that you don't tag.
@@ -428,6 +640,7 @@ def build_agent() -> agents.Agent:
         tools=[
             web_search,
             generate_image,
+            edit_image,
             remember,
             forget_memory,
             schedule_task,
