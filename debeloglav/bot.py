@@ -128,7 +128,7 @@ class Debeloglav(discord.Client):
             scope=scope_of(message),
             channel_id=message.channel.id,
             user_id=message.author.id,
-            user_name=message.author.display_name,
+            user_name=mentions.who(message.author),
             message_id=message.id,
             is_admin=isinstance(message.author, discord.Member)
             and message.author.guild_permissions.manage_guild,
@@ -231,7 +231,7 @@ class Debeloglav(discord.Client):
         if mentioned:
             sections.append(
                 "People it mentions: "
-                + ", ".join(f"{u.display_name} (@{u.name}, id {u.id})" for u in mentioned)
+                + ", ".join(f"{mentions.who(u)}, id {u.id}" for u in mentioned)
             )
 
         # Media from the tagged message and the one it replies to, so "what is this?" works.
@@ -384,7 +384,7 @@ async def read_attachment(
 ) -> None:
     """Add an attachment to the prompt: images as they are, voice and video as transcripts and frames."""
     kind = (attachment.content_type or "").split("/")[0]
-    who = message.author.display_name
+    who = mentions.who(message.author)
     if kind == "image":
         images.append(
             {
@@ -444,7 +444,7 @@ def describe(message: discord.Message) -> str:
         text = " — ".join(filter(None, [embed.title, embed.description, embed.url]))
         if text:
             parts.append(f"[embed: {text}]")
-    return f"{message.author.display_name}: {' '.join(parts).strip()}"
+    return f"{mentions.who(message.author)}: {' '.join(parts).strip()}"
 
 
 async def reply_chain(message: discord.Message, depth: int) -> list[discord.Message]:

@@ -1,12 +1,14 @@
 """Search a server's message history with Discord's Search Guild Messages endpoint."""
 
 import asyncio
+import re
 from datetime import datetime
 
 import discord
 from discord.http import Route
 from mistralai import agents
 
+from . import mentions
 from .context import TIMEZONE, Request
 
 MAX_RESULTS = 25
@@ -91,9 +93,9 @@ async def search(
             sent = datetime.fromisoformat(message["timestamp"]).astimezone(TIMEZONE)
             results.append(
                 {
-                    "author": member.display_name
+                    "author": mentions.who(member)
                     if member
-                    else author_data.get("global_name") or author_data["username"],
+                    else f"{author_data.get('global_name') or author_data['username']} (@{author_data['username']})",
                     "channel": f"#{place.name}",
                     "time": f"{sent:%Y-%m-%d %H:%M}",
                     "content": (message.get("content") or "")[:MAX_CHARS],
@@ -118,6 +120,8 @@ def readable(
 
 async def find_member(guild: discord.Guild, who: str) -> discord.Member:
     """A member by id, mention, username or nickname."""
+    if handle := re.search(r"\(@([^)\s]+)\)", who):  # "Nickname (@username)"
+        who = handle.group(1)
     who = who.strip().lstrip("@")
     digits = who.removeprefix("<@").removeprefix("!").removesuffix(">")
     if digits.isdigit():

@@ -9,6 +9,7 @@ from mistralai.client import models as api_models
 
 from . import store
 from .agent import MODEL, client
+from .mentions import who
 
 log = logging.getLogger("debeloglav.style")
 
@@ -28,7 +29,7 @@ You get the current guide (it may be empty) and the server's messages since the 
 Write the guide in Slovenian, at most 350 words, with these sections:
 ## Ton
 ## Besede in sleng (word or expression: what it means or when it's used)
-## Vzdevki (who is called what)
+## Vzdevki (who is called what, by their @username, which never changes)
 ## Interne šale
 ## Emoji, kletvice in angleščina (how much and which)
 ## Tipični stavki (up to 10 short, typical phrases, each under 12 words)
@@ -90,7 +91,7 @@ async def collect(
                 text = message.clean_content.strip()
                 if message.author.bot or not text:
                     continue
-                lines.append(f"{message.author.display_name}: {text[:MAX_CHARS]}")
+                lines.append(f"{who(message.author)}: {text[:MAX_CHARS]}")
         except discord.HTTPException:
             continue
         lines = lines[: MAX_MESSAGES - total]

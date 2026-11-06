@@ -11,6 +11,13 @@ NAME_CHARS = 64
 NOT_NAMES = {"everyone", "here"}
 
 
+def who(user: discord.abc.User) -> str:
+    """How the model sees a person: the server nickname, plus the @username that never changes with it."""
+    if user.display_name.casefold() == user.name.casefold():
+        return f"@{user.name}"
+    return f"{user.display_name} (@{user.name})"
+
+
 class People:
     """The names and ids of everyone the bot has seen talk or be mentioned, per server."""
 
