@@ -178,7 +178,7 @@ async def test_the_normal_path_defers_runs_one_turn_and_replies_ephemerally():
     assert "Current local time" in text  # now_line()
     assert "What you remember about this server" in text  # memory_prompt(scope)
     assert "[/zamujeno] Timmy (@tim) asks what they missed in #general." in text
-    assert 'Call catch_up with channel "general"' in text
+    assert 'Call catch_up with channel "10"' in text  # by id: names are not unique
 
     ((sent,)) = it.followup.sent
     assert sent["ephemeral"] is True
@@ -201,7 +201,7 @@ async def test_the_named_channel_is_summarized_instead():
     (turn,) = client.turns
     assert turn["request"].channel_id == 10  # still the interaction's channel
     text = turn["content"][0]["text"]
-    assert "#memes" in text and '"memes"' in text
+    assert "#memes" in text and 'Call catch_up with channel "20"' in text  # by id
     assert "general" not in text
     assert client.ended == ["ses-1"]
 

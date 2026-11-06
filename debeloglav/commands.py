@@ -270,7 +270,7 @@ async def zamujeno(
                         style_prompt(scope),
                         (
                             f"[/zamujeno] {user_name} asks what they missed in #{name}. "
-                            f'Call catch_up with channel "{name}" and summarize it for them.'
+                            f'Call catch_up with channel "{place.id}" and summarize it for them.'
                         ),
                     ],
                 )
