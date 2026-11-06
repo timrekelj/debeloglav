@@ -40,7 +40,7 @@ MAX_MEDIA_BYTES = 50 * 1024 * 1024
 DISCORD_LIMIT = 2000
 
 THINKING = "🤔"  # used where the server has no THINKING_EMOTE
-THINKING_EMOTE = os.environ.get("THINKING_EMOTE", "hmmmh")  # the server's custom emote, by name
+THINKING_EMOTE = os.environ.get("THINKING_EMOTE", "hmmmm")  # the server's custom emote, by name
 RESEARCHING = "🔬"
 
 # Tags of people (resolved by mentions.People, at most a few per message) may ping;
