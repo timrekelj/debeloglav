@@ -39,7 +39,8 @@ MAX_REPORT_CHARS = 7600  # four, for research reports
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
 DISCORD_LIMIT = 2000
 
-THINKING = "🤔"
+THINKING = "🤔"  # used where the server has no THINKING_EMOTE
+THINKING_EMOTE = os.environ.get("THINKING_EMOTE", "hmmmh")  # the server's custom emote, by name
 RESEARCHING = "🔬"
 
 # Tags of people (resolved by mentions.People, at most a few per message) may ping;
@@ -134,7 +135,8 @@ class Debeloglav(discord.Client):
             and message.author.guild_permissions.manage_guild,
         )
 
-        await react(message, THINKING)
+        thinking = thinking_emoji(message.guild)
+        await react(message, thinking)
         try:
             content = await self.build_content(
                 message, request, continuing=session_id is not None
@@ -154,7 +156,7 @@ class Debeloglav(discord.Client):
             log.exception("Failed to answer %s", message.jump_url)
             text, files = "Ojoj, nekaj je šlo narobe. Poskusi znova čez trenutek.", []
         finally:
-            await unreact(message, THINKING, self.user)
+            await unreact(message, thinking, self.user)
 
         text = self.people.tag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
@@ -363,14 +365,22 @@ def now_line() -> str:
     return f"Current local time: {datetime.now(TIMEZONE):%A %Y-%m-%d %H:%M} ({TIMEZONE.key})"
 
 
-async def react(message: discord.Message | discord.PartialMessage, emoji: str) -> None:
+def thinking_emoji(guild: discord.Guild | None) -> discord.Emoji | str:
+    """The server's :THINKING_EMOTE: if it has one the bot can use, else 🤔."""
+    emoji = discord.utils.get(guild.emojis, name=THINKING_EMOTE) if guild else None
+    return emoji if emoji and emoji.available else THINKING
+
+
+async def react(
+    message: discord.Message | discord.PartialMessage, emoji: discord.Emoji | str
+) -> None:
     with suppress(discord.HTTPException):
         await message.add_reaction(emoji)
 
 
 async def unreact(
     message: discord.Message | discord.PartialMessage,
-    emoji: str,
+    emoji: discord.Emoji | str,
     me: discord.abc.Snowflake | None,
 ) -> None:
     """Remove the bot's own reaction."""
