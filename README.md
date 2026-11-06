@@ -41,6 +41,7 @@ The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/styl
 ### Catching up
 
 - `@Debeloglav kaj sem zamudil?` or `kaj sem zamudil v #general?` → it reads the channel since your last message there (up to 300 messages) and summarizes what you missed: the main topics, decisions, plans and anything addressed to you, with links to the key messages. If you haven't written there recently, it covers the last 300 messages. Code: `debeloglav/catchup.py`.
+- `/zamujeno [kanal]` → the same summary, but privately: a slash command for everyone that answers ephemerally (only you see it), in this channel or in the one you name. Code: `debeloglav/commands.py`.
 
 ### Background research
 
@@ -65,6 +66,8 @@ Server admins (Manage Server permission) also have the `/debeloglav` command gro
 - `/debeloglav spomini` / `/debeloglav pozabi id` → list, or delete, this server's memories.
 - `/debeloglav naloge` / `/debeloglav preklici id` → list, or cancel, this server's active tasks.
 
+Everyone, not just admins, also has `/zamujeno [kanal]`: an ephemeral (private) summary of what they missed in a channel — see [Catching up](#catching-up).
+
 Per-server blocked channels are stored in SQLite (the `blocked_channels` table), so they survive restarts. Code: `debeloglav/commands.py`.
 
 ## How it works
@@ -83,7 +86,7 @@ Add more tools by writing a function and putting it in `tools=[...]`, or give th
 
 1. Create an application at <https://discord.com/developers/applications> and name it **Debeloglav**.
 2. **Bot** tab: reset and copy the token, and enable **Message Content Intent**.
-3. **OAuth2 → URL Generator**: scopes `bot applications.commands`, permissions `View Channels`, `Send Messages`, `Send Messages in Threads`, `Read Message History`, `Add Reactions`, `Attach Files`. Open the URL to invite the bot. (`applications.commands` is needed for the `/debeloglav` admin commands.)
+3. **OAuth2 → URL Generator**: scopes `bot applications.commands`, permissions `View Channels`, `Send Messages`, `Send Messages in Threads`, `Read Message History`, `Add Reactions`, `Attach Files`. Open the URL to invite the bot. (`applications.commands` is needed for the slash commands, `/zamujeno` and `/debeloglav`.)
 4. Get an API key at <https://console.mistral.ai>.
 5. Configure and run (needs [uv](https://docs.astral.sh/uv/), and [ffmpeg](https://ffmpeg.org) for videos):
 

@@ -34,6 +34,7 @@ def test_the_group_and_its_subcommands_load():
         "debeloglav preklici",
         "debeloglav spomini",
         "debeloglav ucenje",
+        "zamujeno",
     ]
     group = tree.get_command("debeloglav")
     assert isinstance(group, discord.app_commands.Group)
