@@ -5,7 +5,7 @@ session id; the model never sees it.
 """
 
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,9 @@ _requests: dict[str, Request] = {}
 
 # Set by the bot: starts a background research job for a request, or raises agents.ToolError.
 launch_research: Callable[[Request, str], None] | None = None
+
+# Set by the bot: searches the server's message history for a request (see discord_search.search).
+search_messages: Callable[..., Awaitable[dict[str, object]]] | None = None
 
 
 def register(session_id: str, request: Request) -> None:

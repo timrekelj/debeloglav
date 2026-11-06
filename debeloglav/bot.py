@@ -1,6 +1,7 @@
 """Debeloglav on Discord: answers every message that tags it, as a reply to that message."""
 
 import asyncio
+import functools
 import io
 import logging
 import os
@@ -12,7 +13,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import context, media, scheduler, store, style
+from . import context, discord_search, media, scheduler, store, style
 from .agent import (
     NO_REPLY,
     Reply,
@@ -98,6 +99,7 @@ class Debeloglav(discord.Client):
 
     async def setup_hook(self) -> None:
         context.launch_research = self.launch_research
+        context.search_messages = functools.partial(discord_search.search, self)
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
@@ -219,6 +221,12 @@ class Debeloglav(discord.Client):
                     + "\n".join(map(describe, chain))
                 )
         sections.append("Message that tagged you:\n" + describe(message))
+        mentioned = [u for u in message.mentions if u != self.user]
+        if mentioned:
+            sections.append(
+                "People it mentions: "
+                + ", ".join(f"{u.display_name} (@{u.name}, id {u.id})" for u in mentioned)
+            )
 
         # Media from the tagged message and the one it replies to, so "what is this?" works.
         images: list[dict[str, str]] = []

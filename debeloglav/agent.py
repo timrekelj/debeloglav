@@ -133,6 +133,51 @@ def memory_prompt(scope: str) -> str:
     return f"What you remember about this server:\n{lines}"
 
 
+# --- Discord history ---------------------------------------------------------------------------
+
+
+@agents.tool(model_access="direct")
+async def search_discord_messages(
+    ctx: agents.ToolCallbackContext,
+    /,
+    content: str | None = None,
+    author: str | None = None,
+    channel: str | None = None,
+    mentions: str | None = None,
+    has: list[str] | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    oldest_first: bool = False,
+    by_relevance: bool = False,
+) -> dict[str, object]:
+    """Search this server's message history. Returns up to 25 matching messages with author, channel, time and a link.
+
+    content: keywords to find. Keyword search, not semantic: use the words people would have typed, and try variants.
+    author: who wrote it: their name, nickname, @mention or user id.
+    channel: channel name, without #.
+    mentions: messages that mention this person.
+    has: only messages with any of: image, sound, video, file, sticker, embed, link, poll.
+    after / before: local ISO dates or date-times, e.g. 2026-03-01.
+    oldest_first: sort oldest first, e.g. to find when something was first said.
+    by_relevance: sort by relevance instead of time.
+    """
+    request = context.current(ctx)
+    if context.search_messages is None:
+        raise agents.ToolError("Message search is not available.")
+    return await context.search_messages(
+        request,
+        content=content,
+        author=author,
+        channel=channel,
+        mentions=mentions,
+        has=has,
+        after=after,
+        before=before,
+        oldest_first=oldest_first,
+        by_relevance=by_relevance,
+    )
+
+
 # --- Style -------------------------------------------------------------------------------------
 
 
@@ -334,6 +379,10 @@ Memory:
 - When someone explains a word, nickname or expression the server uses (e.g. "pri nas 'X' pomeni Y"), remember it as a slang entry, so you understand and use it later.
 - Call forget_memory when someone asks you to forget something.
 
+Server history:
+- When someone asks what was said in this server, when or who said something, or to find an old message, link or file, call search_discord_messages. Try a few keyword variants (spelling, short forms, dialect) when the first search finds nothing.
+- Quote briefly, say who said it and when, and link the message. Each message lists the people it mentions with their ids; pass the id as author when you have it.
+
 Scheduling:
 - Each message gives the current local time. Use schedule_task for reminders ("remind me in 2 hours"), recurring jobs ("every morning at 8, post the AI news") and watches ("tell me when X happens"). Convert relative times to an absolute local time. Write the task's prompt so that it makes sense on its own later.
 - After scheduling, confirm briefly with the task number and when it runs. Use list_tasks and cancel_task when asked.
@@ -361,6 +410,7 @@ def build_agent() -> agents.Agent:
             list_tasks,
             cancel_task,
             start_research,
+            search_discord_messages,
             show_style_guide,
             configure_style_learning,
         ],
