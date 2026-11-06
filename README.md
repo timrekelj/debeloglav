@@ -75,6 +75,20 @@ cp .env.example .env   # fill in DISCORD_TOKEN and MISTRAL_API_KEY
 uv run --env-file .env python -m debeloglav
 ```
 
+### On a server, with Docker
+
+The image has Python, every library and ffmpeg; you only need Docker with Compose.
+
+```sh
+git clone https://github.com/timrekelj/debeloglav.git && cd debeloglav
+cp .env.example .env              # fill in DISCORD_TOKEN and MISTRAL_API_KEY
+mkdir -p data && sudo chown 1000:1000 data   # the bot runs as user 1000 and keeps its database here
+docker compose up -d --build
+docker compose logs -f            # watch it log in
+```
+
+Memories, tasks and the style guide live in `data/`, so they survive rebuilds; to move them, copy `data/debeloglav.db` from the old machine before starting. Update with `git pull && docker compose up -d --build`. Run only one copy of the bot per token, or every message gets answered twice.
+
 ## Configuration
 
 | Variable           | Default           | Description                                             |
