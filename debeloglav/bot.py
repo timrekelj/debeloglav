@@ -103,7 +103,7 @@ class Debeloglav(discord.Client):
 
     async def setup_hook(self) -> None:
         context.launch_research = self.launch_research
-        context.search_messages = functools.partial(discord_search.search, self)
+        context.search_messages = functools.partial(discord_search.search, self, self.people)
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
@@ -158,7 +158,7 @@ class Debeloglav(discord.Client):
         finally:
             await unreact(message, thinking, self.user)
 
-        text = self.people.tag(getattr(message, "guild", None), text)
+        text = self.people.tag(getattr(message, "guild", None), text, notified=message.author.id)
         sent = await reply_chunks(message, text, files)
         if session_id:
             self.conversations.link(session_id, message.id, *(m.id for m in sent))
@@ -192,14 +192,14 @@ class Debeloglav(discord.Client):
         if self.user in message.mentions:
             return True
         reference = message.reference
-        if reference and (
-            self.conversations.get(reference.message_id)
-            or (
-                isinstance(reference.resolved, discord.Message)
-                and reference.resolved.author == self.user
-            )
+        if (
+            reference
+            and isinstance(reference.resolved, discord.Message)
+            and reference.resolved.author == self.user
         ):
-            return True  # a reply to Debeloglav continues the conversation, even without a ping
+            # A reply to Debeloglav continues the conversation, even without a ping;
+            # a reply to someone else's message in that conversation doesn't.
+            return True
         # Tagging the bot's managed role from autocomplete also counts.
         return any(
             role.tags and role.tags.bot_id == self.user.id
@@ -218,6 +218,8 @@ class Debeloglav(discord.Client):
         else:
             chain = await reply_chain(message, depth=REPLY_CHAIN_DEPTH)
             history = await recent_history(message, exclude={m.id for m in chain})
+            for seen in [*history, *chain]:
+                self.people.see_message(seen)  # the model may tag anyone it is shown
             if history:
                 sections.append(
                     "Recent messages in the channel (oldest first):\n"
@@ -286,7 +288,7 @@ class Debeloglav(discord.Client):
         if message is None:
             return  # the channel is gone or unreachable: nowhere to post the report
 
-        text = self.people.tag(getattr(message, "guild", None), text)
+        text = self.people.tag(getattr(message, "guild", None), text, notified=request.user_id)
         sent = await reply_chunks(message, text, files)
         # Replies to the report continue the conversation that asked for it.
         if request.session_id:
@@ -327,7 +329,9 @@ class Debeloglav(discord.Client):
         if task.watch and reply is not None:
             store.set_last_report(task.id, reply.text)
 
-        text = self.people.tag(getattr(channel, "guild", None), text)
+        text = self.people.tag(
+            getattr(channel, "guild", None), text, notified=task.user_id if task.mention else None
+        )
         if task.mention:
             text = f"<@{task.user_id}> {text}"
         chunks = split(text) or [""]

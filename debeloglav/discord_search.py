@@ -9,7 +9,7 @@ from discord.http import Route
 from mistralai import agents
 
 from .context import TIMEZONE, Request
-from .mentions import who
+from .mentions import People, who
 
 MAX_RESULTS = 25
 MAX_CHARS = 400
@@ -20,6 +20,7 @@ HAS_TYPES = {"image", "sound", "video", "file", "sticker", "embed", "link", "pol
 
 async def search(
     bot: discord.Client,
+    people: People,
     request: Request,
     *,
     content: str | None = None,
@@ -91,6 +92,14 @@ async def search(
                 continue
             author_data = message["author"]
             member = guild.get_member(int(author_data["id"]))
+            # The model may tag the people it finds.
+            people.learn(
+                guild.id,
+                int(author_data["id"]),
+                author_data["username"],
+                author_data.get("global_name"),
+                member and member.display_name,
+            )
             sent = datetime.fromisoformat(message["timestamp"]).astimezone(TIMEZONE)
             results.append(
                 {
@@ -99,7 +108,7 @@ async def search(
                     else f"{author_data.get('global_name') or author_data['username']} (@{author_data['username']})",
                     "channel": f"#{place.name}",
                     "time": f"{sent:%Y-%m-%d %H:%M}",
-                    "content": (message.get("content") or "")[:MAX_CHARS],
+                    "content": readable_content(guild, message)[:MAX_CHARS],
                     "attachments": [
                         a["filename"] for a in message.get("attachments", [])
                     ],
@@ -111,6 +120,27 @@ async def search(
         "messages": results,
         "more_may_exist": len(groups) >= MAX_RESULTS,
     }
+
+
+def readable_content(guild: discord.Guild, message: dict) -> str:
+    """The message text with <@id>, <@&id> and <#id> written as names, like Discord shows them."""
+    users = {
+        int(u["id"]): u.get("member", {}).get("nick") or u.get("global_name") or u["username"]
+        for u in message.get("mentions", [])
+    }
+
+    def name(match: re.Match[str]) -> str:
+        kind, id_ = match.group(1), int(match.group(2))
+        if kind == "#":
+            place = guild.get_channel_or_thread(id_)
+            return f"#{place.name}" if place else "#deleted-channel"
+        if kind == "@&":
+            role = guild.get_role(id_)
+            return f"@{role.name}" if role else "@deleted-role"
+        member = guild.get_member(id_)
+        return member.display_name if member else users.get(id_, "unknown-user")
+
+    return re.sub(r"<(@!?|@&|#)(\d+)>", name, message.get("content") or "")
 
 
 def readable(
