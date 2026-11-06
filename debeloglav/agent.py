@@ -133,6 +133,66 @@ def memory_prompt(scope: str) -> str:
     return f"What you remember about this server:\n{lines}"
 
 
+# --- Style -------------------------------------------------------------------------------------
+
+
+def style_prompt(scope: str) -> str:
+    style = store.style(scope)
+    if not (style.enabled and style.guide):
+        return ""
+    return f"How people in this server talk (your style guide, learned from their messages):\n{style.guide}"
+
+
+@agents.tool(model_access="direct")
+def show_style_guide(ctx: agents.ToolCallbackContext, /) -> dict[str, object]:
+    """Show the style guide you learned from this server's messages, and the learning settings."""
+    style = store.style(context.current(ctx).scope)
+    return {
+        "enabled": style.enabled,
+        "channels": style.channels or "all channels",
+        "learned_at": f"{style.learned_at.astimezone(TIMEZONE):%Y-%m-%d %H:%M}" if style.learned_at else None,
+        "guide": style.guide or "(nothing learned yet)",
+    }
+
+
+@agents.tool(model_access="direct")
+def configure_style_learning(
+    ctx: agents.ToolCallbackContext,
+    /,
+    enabled: bool | None = None,
+    channels: list[str] | None = None,
+    all_channels: bool = False,
+    relearn: bool = False,
+) -> str:
+    """Change how you learn this server's way of talking. Only server admins may do this.
+
+    enabled: turn daily learning on or off. Turning it off also deletes the learned guide.
+    channels: learn only from these channel names (without #).
+    all_channels: learn from every channel again.
+    relearn: forget the guide and learn it again from the last week, within 15 minutes.
+    """
+    request = context.current(ctx)
+    if not request.scope.startswith("guild:"):
+        raise agents.ToolError("Style learning only works in a server.")
+    if not request.is_admin:
+        raise agents.ToolError("Only server admins (Manage Server permission) can change this.")
+    style = store.style(request.scope)
+    if enabled is not None:
+        style.enabled = enabled
+        if not enabled:
+            style.guide = None
+        style.learned_at = None
+    if channels:
+        style.channels = [name.strip().lstrip("#").lower() for name in channels if name.strip()]
+    if all_channels:
+        style.channels = None
+    if relearn:
+        style.guide, style.learned_at = None, None
+    store.save_style(request.scope, style)
+    where = ", ".join(f"#{name}" for name in style.channels) if style.channels else "all channels"
+    return f"Style learning is {'on' if style.enabled else 'off'}, from {where}."
+
+
 # --- Scheduling --------------------------------------------------------------------------------
 
 
@@ -264,7 +324,8 @@ How to behave:
 Language and tone:
 - Always write in Slovenian, even when the question or the sources are in another language. Switch only when someone explicitly asks for another language.
 - Talk like a friend in the chat, not like an official or a customer-support bot: casual spoken Slovenian (pogovorni jezik), always tikaj (never vikaj), short sentences, no stiff phrases like "Spoštovani", "Z veseljem vam pomagam" or "Upam, da sem vam pomagal".
-- Mirror how people in this server talk: pick up their words, slang, abbreviations and humour from the recent messages and from what you remember. Don't overdo it, and don't make up slang that nobody uses.
+- Mirror how people in this server talk: pick up their words, slang, abbreviations and humour from your style guide (when a message includes one), the recent messages and what you remember. Don't overdo it, and don't make up slang that nobody uses.
+- You learn the style guide every day from the server's messages. When asked what you learned, call show_style_guide. Admins can turn learning off, limit it to channels or make you relearn with configure_style_learning.
 - Keep facts, numbers and names exact; casual tone never means sloppy content.
 
 Memory:
@@ -300,6 +361,8 @@ def build_agent() -> agents.Agent:
             list_tasks,
             cancel_task,
             start_research,
+            show_style_guide,
+            configure_style_learning,
         ],
         output_type=Reply,
         builtins=QUIET,

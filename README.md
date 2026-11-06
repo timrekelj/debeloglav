@@ -23,6 +23,15 @@ Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-st
 - Reply to any of Debeloglav's messages (no tag needed) to continue that conversation: it remembers what was said. Each conversation is an Agents SDK session, kept for 6 idle hours.
 - `@Debeloglav zapomni si, da je Tim admin` → saved for the whole server and known in every conversation. `pozabi #3` deletes it.
 
+### Learning how the server talks
+
+- Once a day it reads the server's recent messages (the last week on the first run, then everything since the last run) and updates a short **style guide**: tone, words and slang, nicknames, inside jokes, how much emoji, swearing and English, and typical phrases. Every reply uses it.
+- It describes how people talk, not what they said, and leaves out personal data. Bot messages and channels it can't read are skipped.
+- `@Debeloglav kaj si se naučil o nas?` shows the guide.
+- Admins (Manage Server permission) can change it: `uči se samo iz #general in #memes`, `uči se iz vseh kanalov`, `nauči se znova`, or `nehaj se učiti` (which also deletes the guide).
+
+The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/style.py`.
+
 ### Background research
 
 - `@Debeloglav razišči podrobno …` → it answers that it's on it, reacts with 🔬, and a research lead agent splits the question and runs up to 5 researcher subagents in parallel. When the report is ready it's posted as a reply to your message and the 🔬 is removed. Reply to the report to ask follow-ups.

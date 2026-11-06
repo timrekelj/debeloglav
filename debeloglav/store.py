@@ -1,5 +1,6 @@
-"""SQLite storage for what has to survive a restart: server memories and scheduled tasks."""
+"""SQLite storage for what has to survive a restart: memories, scheduled tasks and style guides."""
 
+import json
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -32,7 +33,22 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tasks_due ON tasks (active, next_run);
+CREATE TABLE IF NOT EXISTS styles (
+    scope TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    channels TEXT,  -- JSON list of channel names to learn from; NULL means every channel
+    guide TEXT,
+    learned_at TEXT  -- NULL means learn at the next check
+);
 """
+
+
+@dataclass
+class Style:
+    enabled: bool = True
+    channels: list[str] | None = None
+    guide: str | None = None
+    learned_at: datetime | None = None
 
 
 @dataclass
@@ -195,4 +211,34 @@ def cancel_task(scope: str, task_id: int) -> bool:
                 (scope, task_id),
             ).rowcount
             > 0
+        )
+
+
+def style(scope: str) -> Style:
+    with _connect() as db:
+        row = db.execute("SELECT * FROM styles WHERE scope = ?", (scope,)).fetchone()
+    if row is None:
+        return Style()
+    return Style(
+        enabled=bool(row["enabled"]),
+        channels=json.loads(row["channels"]) if row["channels"] else None,
+        guide=row["guide"],
+        learned_at=datetime.fromisoformat(row["learned_at"]) if row["learned_at"] else None,
+    )
+
+
+def save_style(scope: str, style: Style) -> None:
+    with _connect() as db:
+        db.execute(
+            """INSERT INTO styles (scope, enabled, channels, guide, learned_at) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (scope) DO UPDATE SET
+                 enabled = excluded.enabled, channels = excluded.channels,
+                 guide = excluded.guide, learned_at = excluded.learned_at""",
+            (
+                scope,
+                style.enabled,
+                json.dumps(style.channels) if style.channels else None,
+                style.guide,
+                style.learned_at.isoformat() if style.learned_at else None,
+            ),
         )

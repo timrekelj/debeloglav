@@ -12,7 +12,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import context, media, scheduler, store
+from . import context, media, scheduler, store, style
 from .agent import (
     NO_REPLY,
     Reply,
@@ -20,6 +20,7 @@ from .agent import (
     build_research_agent,
     download_file,
     memory_prompt,
+    style_prompt,
 )
 from .context import TIMEZONE, Request
 
@@ -99,6 +100,7 @@ class Debeloglav(discord.Client):
         context.launch_research = self.launch_research
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
+        self.spawn(style.run_forever(self))
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
@@ -122,6 +124,8 @@ class Debeloglav(discord.Client):
             user_id=message.author.id,
             user_name=message.author.display_name,
             message_id=message.id,
+            is_admin=isinstance(message.author, discord.Member)
+            and message.author.guild_permissions.manage_guild,
         )
 
         await react(message, THINKING)
@@ -195,7 +199,7 @@ class Debeloglav(discord.Client):
     async def build_content(
         self, message: discord.Message, request: Request, *, continuing: bool
     ) -> list[dict[str, str]]:
-        sections = [now_line(), memory_prompt(request.scope)]
+        sections = [now_line(), memory_prompt(request.scope), style_prompt(request.scope)]
         if continuing:
             # The session already has the conversation; add only what this message replies to.
             chain = await reply_chain(message, depth=1)
@@ -224,7 +228,7 @@ class Debeloglav(discord.Client):
                 await read_attachment(source, attachment, images, notes)
         sections.extend(notes)
 
-        return [{"type": "text", "text": "\n\n".join(sections)}, *images[:MAX_IMAGES]]
+        return [{"type": "text", "text": "\n\n".join(filter(None, sections))}, *images[:MAX_IMAGES]]
 
     # --- Background research -------------------------------------------------------------------
 
@@ -282,6 +286,7 @@ class Debeloglav(discord.Client):
             f"[Scheduled task #{task.id}] {kind}, created by {task.user_name}.",
             now_line(),
             memory_prompt(task.scope),
+            style_prompt(task.scope),
         ]
         if task.watch:
             prompt.append(
@@ -291,7 +296,7 @@ class Debeloglav(discord.Client):
         prompt.append(f"Task: {task.prompt}")
 
         session_id, state = await self.run_turn(
-            self.agent, None, request, [{"type": "text", "text": "\n\n".join(prompt)}]
+            self.agent, None, request, [{"type": "text", "text": "\n\n".join(filter(None, prompt))}]
         )
         reply = parse(state)
         if reply is not None and reply.answer.strip().startswith(NO_REPLY):

@@ -21,6 +21,7 @@ class Request:
     user_id: int
     user_name: str
     message_id: int | None = None  # the message that asked; None for scheduled runs
+    is_admin: bool = False  # may change server settings (Manage Server permission)
     session_id: str | None = None  # the conversation's session, set when its turn starts
 
 
