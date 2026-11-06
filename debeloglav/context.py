@@ -15,6 +15,14 @@ TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Ljubljana"))
 
 
 @dataclass
+class EditableImage:
+    """An image from this turn's message that edit_image can edit: JPEG bytes plus a label for the prompt."""
+
+    data: bytes
+    label: str  # e.g. "photo.jpg from Luka (@luka)"
+
+
+@dataclass
 class Request:
     scope: str  # "guild:<id>" or "dm:<user id>": whose memories and tasks
     channel_id: int
@@ -23,6 +31,7 @@ class Request:
     message_id: int | None = None  # the message that asked; None for scheduled runs
     is_admin: bool = False  # may change server settings (Manage Server permission)
     session_id: str | None = None  # the conversation's session, set when its turn starts
+    editable_images: list[EditableImage] = field(default_factory=list)  # this turn's images, set by the bot
 
 
 _requests: dict[str, Request] = {}
@@ -42,6 +51,7 @@ class FoundImage:
     """An image a tool produced, for the bot to attach to the reply."""
 
     data: bytes
+    regenerated: bool = False  # True when it was regenerated instead of edited
 
 
 @dataclass
@@ -49,13 +59,13 @@ class Found:
     """What the tools of one turn found, for the bot to attach to the reply."""
 
     sources: dict[str, str] = field(default_factory=dict)  # url -> title
-    images: list[FoundImage] = field(default_factory=list)  # generated images, as bytes
+    images: list[FoundImage] = field(default_factory=list)  # generated or edited images, as bytes
 
 
 _found: dict[str, Found] = {}
 
 
-def record(ctx: agents.ToolCallbackContext, *, sources: dict[str, str] | None = None, image: bytes | None = None) -> None:
+def record(ctx: agents.ToolCallbackContext, *, sources: dict[str, str] | None = None, image: bytes | None = None, regenerated: bool = False) -> None:
     """Note sources or a generated image for the conversation's current turn."""
     if ctx.session.id not in _requests:
         return  # a session the bot does not post from, such as a research subagent
@@ -63,7 +73,7 @@ def record(ctx: agents.ToolCallbackContext, *, sources: dict[str, str] | None = 
     for url, title in (sources or {}).items():
         found.sources.setdefault(url, title)
     if image is not None:
-        found.images.append(FoundImage(data=image))
+        found.images.append(FoundImage(data=image, regenerated=regenerated))
 
 
 def take_found(session_id: str) -> Found:

@@ -1,6 +1,7 @@
 """Debeloglav on Discord: answers every message that tags it, as a reply to that message."""
 
 import asyncio
+import base64
 import functools
 import io
 import logging
@@ -241,10 +242,17 @@ class Debeloglav(discord.Client):
         # Media from the tagged message and the one it replies to, so "what is this?" works.
         images: list[dict[str, str]] = []
         notes: list[str] = []
+        editable: list[context.EditableImage] = []
         for source in [*chain[-1:], message]:
             for attachment in source.attachments:
-                await read_attachment(source, attachment, images, notes)
+                await read_attachment(source, attachment, images, notes, editable)
         sections.extend(notes)
+        if editable:
+            request.editable_images = editable[:MAX_IMAGES]
+            sections.append(
+                "Images you can edit with edit_image:\n"
+                + "\n".join(f"{i + 1}: {item.label}" for i, item in enumerate(request.editable_images))
+            )
 
         return [{"type": "text", "text": "\n\n".join(filter(None, sections))}, *images[:MAX_IMAGES]]
 
@@ -399,9 +407,10 @@ async def read_attachment(
     attachment: discord.Attachment,
     images: list[dict[str, str]],
     notes: list[str],
+    editable: list[context.EditableImage] | None = None,
 ) -> None:
     """Add an attachment to the prompt: images as they are, voice and video as transcripts and frames,
-    documents as their text."""
+    documents as their text. Real images also go to `editable`, so edit_image can edit them."""
     kind = (attachment.content_type or "").split("/")[0]
     if not kind and attachment.filename.lower().endswith(IMAGE_SUFFIXES):
         kind = "image"  # Discord didn't say what it is
@@ -411,12 +420,18 @@ async def read_attachment(
         try:
             if attachment.size > MAX_MEDIA_BYTES:
                 raise ValueError("too large")
-            uri = await media.image(await attachment.read(), attachment.filename)
+            jpeg = await media.image(await attachment.read(), attachment.filename)
         except Exception:
             log.exception("Could not read image %s", attachment.filename)
             notes.append(f"[{who} sent the image {attachment.filename}, but it could not be opened]")
             return
-        images.append({"type": "image", "uri": uri, "mediaType": "image/jpeg"})
+        images.append({
+            "type": "image",
+            "uri": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+            "mediaType": "image/jpeg",
+        })
+        if editable is not None:
+            editable.append(context.EditableImage(data=jpeg, label=f"{attachment.filename} from {who}"))
         return
     document = media.is_document(attachment.filename, attachment.content_type)
     if kind not in ("audio", "video") and not attachment.is_voice_message() and not document:
@@ -552,6 +567,8 @@ async def render(
             for url, title in list(reply.found.sources.items())[:MAX_SOURCES]
         ]
         text += "\n-# Viri: " + " · ".join(links)
+    if any(image.regenerated for image in reply.found.images):
+        text += "\n-# Slike ni bilo mogoče urediti, zato je ustvarjena na novo."
     return text, files
 
 

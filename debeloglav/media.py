@@ -57,8 +57,8 @@ async def document_text(data: bytes, file_name: str) -> str:
     return "\n\n".join(page.markdown.strip() for page in response.pages).strip()
 
 
-async def image(data: bytes, file_name: str) -> str:
-    """The image as a JPEG data URI, scaled down to IMAGE_SIDE (the first frame of a GIF)."""
+async def image(data: bytes, file_name: str) -> bytes:
+    """The image as JPEG bytes, scaled down to IMAGE_SIDE (the first frame of a GIF)."""
     with tempfile.TemporaryDirectory() as tmp:
         source = Path(tmp) / f"input{Path(file_name).suffix or '.png'}"
         source.write_bytes(data)
@@ -74,7 +74,7 @@ async def image(data: bytes, file_name: str) -> str:
             "3",
             str(jpeg),
         )
-        return "data:image/jpeg;base64," + base64.b64encode(jpeg.read_bytes()).decode()
+        return jpeg.read_bytes()
 
 
 async def video_frames_and_audio(

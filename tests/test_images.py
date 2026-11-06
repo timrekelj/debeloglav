@@ -1,5 +1,6 @@
 """The image tools, with the Mistral client mocked: URL parsing, fallbacks, edit acceptance, rendering."""
 
+import base64
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -197,3 +198,234 @@ async def test_render_attaches_the_image_bytes_with_a_suffix_by_content():
     assert text == "Tu je slika."
 
 
+async def test_render_labels_a_regenerated_image():
+    answer = bot.Answer(
+        text="Spremenjeno.",
+        found=Found(
+            sources={"https://x": "X"},
+            images=[FoundImage(data=b"\xff\xd8\xff new", regenerated=True)],
+        ),
+    )
+    text, files = await bot.render(answer)
+    assert files[0].filename == "debeloglav_1.jpg"
+    assert "-# Viri: [X](<https://x>)" in text
+    assert text.endswith("-# Slike ni bilo mogoče urediti, zato je ustvarjena na novo.")
+
+
+async def test_render_does_not_label_a_real_edit():
+    answer = bot.Answer(
+        text="Spremenjeno.",
+        found=Found(images=[FoundImage(data=b"\xff\xd8\xff edited")]),
+    )
+    text, _files = await bot.render(answer)
+    assert "Slike ni bilo" not in text
+
+
+# --- edit_image ---------------------------------------------------------------------------------
+
+
+async def test_edit_image_accepts_a_real_edit(env):
+    env.request.editable_images = [
+        context.EditableImage(
+            data=b"\xff\xd8src", label="photo.jpg from Luka K (@luka)"
+        )
+    ]
+    env.conversations.responses.append(
+        response(
+            tool_entry(
+                {"image_url": SIGNED, "prompt": "add a red top hat"},
+                "https://out.example/edited.jpg?se=2",
+            )
+        )
+    )
+    result = await agent.edit_image.__wrapped__(
+        env.ctx, instruction="add a red top hat", image=1
+    )
+    found = context.take_found(SESSION)
+    assert result == "The image is edited and will be attached to your reply."
+    assert len(found.images) == 1
+    assert found.images[0].regenerated is False
+    assert found.images[0].data == b"IMG:https://out.example/edited.jpg?se=2"
+    # the image was uploaded for editing, and deleted again afterwards
+    assert env.files.uploads == [
+        ({"file_name": "image.jpg", "content": b"\xff\xd8src"}, "image_generation")
+    ]
+    assert env.files.deleted == ["file-1"]
+    # the signed URL went to the tool both in the text and as the image_url chunk
+    content = env.conversations.calls[0]["inputs"][0]["content"]
+    assert SIGNED in content[0]["text"] and content[0]["text"].endswith(
+        "add a red top hat"
+    )
+    assert content[1] == {"type": "image_url", "image_url": SIGNED}
+
+
+async def test_edit_image_retries_when_the_tool_uses_another_url(env):
+    env.request.editable_images = [
+        context.EditableImage(data=b"src", label="photo.jpg from Luka K (@luka)")
+    ]
+    env.conversations.responses.extend(
+        [
+            response(
+                tool_entry(
+                    {"image_url": "https://wrong.example/x.jpg", "prompt": "p"},
+                    "https://out.example/a.jpg",
+                )
+            ),
+            response(
+                tool_entry(
+                    {
+                        "image_url": "https://signed.example/file-2?se=abc",
+                        "prompt": "p",
+                    },
+                    "https://out.example/b.jpg",
+                )
+            ),
+        ]
+    )
+    await agent.edit_image.__wrapped__(env.ctx, instruction="add a hat", image=1)
+    found = context.take_found(SESSION)
+    assert found.images[0].data == b"IMG:https://out.example/b.jpg"
+    assert found.images[0].regenerated is False
+    assert len(env.files.uploads) == 2  # retried with a fresh upload
+    assert env.files.deleted == ["file-1", "file-2"]
+
+
+async def test_edit_image_falls_back_to_a_labelled_regeneration(env):
+    env.request.editable_images = [
+        context.EditableImage(
+            data=b"\xff\xd8src", label="photo.jpg from Luka K (@luka)"
+        )
+    ]
+    env.conversations.responses.extend(
+        [
+            # attempt 1: the tool edited some other URL
+            response(
+                tool_entry(
+                    {"image_url": "https://wrong.example/x.jpg", "prompt": "p"},
+                    "https://out.example/a.jpg",
+                )
+            ),
+            # attempt 2: no tool call at all
+            response(message_entry("I cannot edit this.")),
+            # the fallback regeneration
+            response(
+                tool_entry({"prompt": "regen"}, "https://out.example/new.jpg?se=9")
+            ),
+        ]
+    )
+    result = await agent.edit_image.__wrapped__(
+        env.ctx, instruction="add a red top hat", image=1
+    )
+    found = context.take_found(SESSION)
+    assert len(found.images) == 1
+    assert found.images[0].regenerated is True
+    assert found.images[0].data == b"IMG:https://out.example/new.jpg?se=9"
+    assert "new version" in result
+    # the image was described with the vision model, and the change appended to the prompt
+    assert len(env.chat.calls) == 1
+    assert env.chat.calls[0]["model"] == agent.MODEL
+    prompt = env.conversations.calls[2]["inputs"]
+    assert "add a red top hat" in prompt
+    assert "A grey cat on a red sofa" in prompt
+    assert env.files.deleted == ["file-1", "file-2"]
+
+
+async def test_edit_image_without_an_image_fails(env):
+    with pytest.raises(agents.ToolError):
+        await agent.edit_image.__wrapped__(env.ctx, instruction="add a hat")
+
+
+async def test_edit_image_with_a_bad_number_fails(env):
+    env.request.editable_images = [
+        context.EditableImage(data=b"src", label="photo.jpg from Luka K (@luka)")
+    ]
+    with pytest.raises(agents.ToolError):
+        await agent.edit_image.__wrapped__(env.ctx, instruction="add a hat", image=2)
+    assert context.take_found(SESSION).images == []
+
+
+# --- build_content / read_attachment ------------------------------------------------------------
+
+
+class EmptyChannel:
+    id = 1
+
+    def history(self, limit=None, before=None):
+        async def stream():
+            for m in []:
+                yield m
+
+        return stream()
+
+
+def attachment(filename, content_type, data=b"raw"):
+    async def read():
+        return data
+
+    return SimpleNamespace(
+        filename=filename,
+        content_type=content_type,
+        size=len(data),
+        url=f"https://cdn/{filename}",
+        read=read,
+        is_voice_message=lambda: False,
+    )
+
+
+async def test_build_content_lists_the_editable_images(monkeypatch):
+    async def fake_image(data, file_name):
+        return b"\xff\xd8\xffjpeg"
+
+    monkeypatch.setattr(bot.media, "image", fake_image)
+    author = SimpleNamespace(id=2, name="luka", display_name="Luka K")
+    message = SimpleNamespace(
+        id=10,
+        author=author,
+        clean_content="dodaj mu klobuk",
+        attachments=[attachment("photo.jpg", "image/jpeg")],
+        reference=None,
+        mentions=[],
+        embeds=[],
+        channel=EmptyChannel(),
+    )
+    request = Request(scope="dm:2", channel_id=1, user_id=2, user_name="Luka (@luka)")
+    content = await bot.Debeloglav.build_content(
+        SimpleNamespace(user=None), message, request, continuing=False
+    )
+    assert request.editable_images == [
+        context.EditableImage(
+            data=b"\xff\xd8\xffjpeg", label="photo.jpg from Luka K (@luka)"
+        )
+    ]
+    assert (
+        "Images you can edit with edit_image:\n1: photo.jpg from Luka K (@luka)"
+        in content[0]["text"]
+    )
+    assert content[1] == {
+        "type": "image",
+        "uri": "data:image/jpeg;base64,"
+        + base64.b64encode(b"\xff\xd8\xffjpeg").decode(),
+        "mediaType": "image/jpeg",
+    }
+
+
+async def test_video_frames_are_not_editable(monkeypatch):
+    async def fake_frames(data, file_name):
+        return ["data:image/jpeg;base64,AAA"], b"mp3"
+
+    async def fake_transcribe(data, file_name):
+        return "hello"
+
+    monkeypatch.setattr(bot.media, "video_frames_and_audio", fake_frames)
+    monkeypatch.setattr(bot.media, "transcribe", fake_transcribe)
+    message = SimpleNamespace(
+        author=SimpleNamespace(id=2, name="luka", display_name="Luka")
+    )
+    images: list[dict[str, str]] = []
+    notes: list[str] = []
+    editable: list[context.EditableImage] = []
+    await bot.read_attachment(
+        message, attachment("clip.mp4", "video/mp4"), images, notes, editable
+    )
+    assert editable == []  # video frames go to the prompt, but are not editable
+    assert len(images) == 1
