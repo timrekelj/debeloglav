@@ -14,6 +14,7 @@ Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-st
 - `@Debeloglav nariši mačko v ljubljanski kavarni` → it **generates an image** (Mistral's `image_generation` tool) and attaches it to the reply.
 - It reads the reply thread and the last few channel messages for context.
 - In DMs it answers every message.
+- It always talks in casual Slovenian (tika, no formal phrases) and picks up the server's slang from recent messages and from what it remembers. Teach it words with `@Debeloglav pri nas 'X' pomeni Y`.
 - It never pings `@everyone`, `@here`, roles or other users.
 - While it works, it reacts to your message with 🤔, and removes the reaction when it replies.
 
