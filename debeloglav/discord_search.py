@@ -92,14 +92,8 @@ async def search(
                 continue
             author_data = message["author"]
             member = guild.get_member(int(author_data["id"]))
-            # The model may tag the people it finds.
-            people.learn(
-                guild.id,
-                int(author_data["id"]),
-                author_data["username"],
-                author_data.get("global_name"),
-                member and member.display_name,
-            )
+            for user in [author_data, *message.get("mentions", [])]:
+                people.learn(guild.id, int(user["id"]), user["username"])  # the model may tag them
             sent = datetime.fromisoformat(message["timestamp"]).astimezone(TIMEZONE)
             results.append(
                 {

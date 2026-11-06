@@ -43,7 +43,7 @@ THINKING = "🤔"  # used where the server has no THINKING_EMOTE
 THINKING_EMOTE = os.environ.get("THINKING_EMOTE", "hmmmm")  # the server's custom emote, by name
 RESEARCHING = "🔬"
 
-# Tags of people (resolved by mentions.People, at most a few per message) may ping;
+# Tags of people (resolved by mentions.People) may ping;
 # @everyone, @here and roles never do.
 ALLOWED_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True)
 
@@ -120,7 +120,7 @@ class Debeloglav(discord.Client):
     # --- Answering -----------------------------------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
-        self.people.see_message(message)  # learn names, so "@Name" in a reply becomes a real tag
+        self.people.see_message(message)  # learn usernames, so "@username" in a reply becomes a real tag
         if message.author.bot or not self.is_summoned(message):
             return
         parent_id = message.reference.message_id if message.reference else None
@@ -158,7 +158,7 @@ class Debeloglav(discord.Client):
         finally:
             await unreact(message, thinking, self.user)
 
-        text = self.people.tag(getattr(message, "guild", None), text, notified=message.author.id)
+        text = await self.people.tag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
         if session_id:
             self.conversations.link(session_id, message.id, *(m.id for m in sent))
@@ -288,7 +288,7 @@ class Debeloglav(discord.Client):
         if message is None:
             return  # the channel is gone or unreachable: nowhere to post the report
 
-        text = self.people.tag(getattr(message, "guild", None), text, notified=request.user_id)
+        text = await self.people.tag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
         # Replies to the report continue the conversation that asked for it.
         if request.session_id:
@@ -329,9 +329,7 @@ class Debeloglav(discord.Client):
         if task.watch and reply is not None:
             store.set_last_report(task.id, reply.text)
 
-        text = self.people.tag(
-            getattr(channel, "guild", None), text, notified=task.user_id if task.mention else None
-        )
+        text = await self.people.tag(getattr(channel, "guild", None), text)
         if task.mention:
             text = f"<@{task.user_id}> {text}"
         chunks = split(text) or [""]
