@@ -1,6 +1,6 @@
 # Debeloglav
 
-A Discord bot that works like @grok on X: tag it in a message and it replies to that message. It searches the web to research and fact-check before answering, and lists its sources under the reply. It understands images, voice messages and videos, and can answer with a generated image.
+A Discord bot that works like @grok on X: tag it in a message and it replies to that message. It searches the web to research and fact-check before answering, and lists its sources under the reply. It understands images, voice messages, videos and documents (PDF, Word, PowerPoint, text and code files), and can answer with a generated image.
 
 Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-started/quickstart) (Mistral's Agents SDK) on **Mistral Large 4** (`mistral-large-4`), and [discord.py](https://discordpy.readthedocs.io).
 
@@ -101,6 +101,7 @@ Memories, tasks and the style guide live in `data/`, so they survive rebuilds; t
 | `CONTEXT_MESSAGES` | `10`              | How many earlier channel messages to include (0 = none) |
 | `TRANSCRIBE_MODEL` | `voxtral-mini-transcribe-3` | Model for voice messages and video sound   |
 | `VIDEO_FRAMES`     | `6`               | How many frames to sample from a video                  |
+| `OCR_MODEL`        | `mistral-ocr-latest` | Model that reads PDF, Word and PowerPoint files      |
 | `TIMEZONE`         | `Europe/Ljubljana` | Time zone for reminders and recurring tasks            |
 | `DB_PATH`          | `data/debeloglav.db` | SQLite file for memories and tasks                      |
 | `MAX_RESEARCH_JOBS` | `3`              | How many research jobs can run at once                  |

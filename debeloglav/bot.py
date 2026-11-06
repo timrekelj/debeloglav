@@ -37,6 +37,8 @@ MAX_SOURCES = 5
 MAX_REPLY_CHARS = 3600  # two Discord messages
 MAX_REPORT_CHARS = 7600  # four, for research reports
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
+MAX_DOCUMENT_CHARS = 40_000  # about 10k tokens of a document's text in the prompt
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif", ".avif")
 DISCORD_LIMIT = 2000
 
 THINKING = "🤔"  # used where the server has no THINKING_EMOTE
@@ -398,19 +400,26 @@ async def read_attachment(
     images: list[dict[str, str]],
     notes: list[str],
 ) -> None:
-    """Add an attachment to the prompt: images as they are, voice and video as transcripts and frames."""
+    """Add an attachment to the prompt: images as they are, voice and video as transcripts and frames,
+    documents as their text."""
     kind = (attachment.content_type or "").split("/")[0]
+    if not kind and attachment.filename.lower().endswith(IMAGE_SUFFIXES):
+        kind = "image"  # Discord didn't say what it is
     who = mentions.who(message.author)
     if kind == "image":
-        images.append(
-            {
-                "type": "image",
-                "uri": attachment.url,
-                "mediaType": attachment.content_type or "",
-            }
-        )
+        # Sent as data: the model can't always download a Discord link, or a big phone screenshot.
+        try:
+            if attachment.size > MAX_MEDIA_BYTES:
+                raise ValueError("too large")
+            uri = await media.image(await attachment.read(), attachment.filename)
+        except Exception:
+            log.exception("Could not read image %s", attachment.filename)
+            notes.append(f"[{who} sent the image {attachment.filename}, but it could not be opened]")
+            return
+        images.append({"type": "image", "uri": uri, "mediaType": "image/jpeg"})
         return
-    if kind not in ("audio", "video") and not attachment.is_voice_message():
+    document = media.is_document(attachment.filename, attachment.content_type)
+    if kind not in ("audio", "video") and not attachment.is_voice_message() and not document:
         return
     if attachment.size > MAX_MEDIA_BYTES:
         notes.append(f"[{who} sent {attachment.filename}, too large to process]")
@@ -418,7 +427,14 @@ async def read_attachment(
 
     try:
         data = await attachment.read()
-        if kind == "video":
+        if document:
+            text = await media.document_text(data, attachment.filename)
+            if len(text) > MAX_DOCUMENT_CHARS:
+                text = text[:MAX_DOCUMENT_CHARS] + "\n[… the rest of the document is cut off]"
+            notes.append(
+                f"[Document {attachment.filename} from {who}, its text:\n{text or '(no text)'}\n]"
+            )
+        elif kind == "video":
             frames, audio = await media.video_frames_and_audio(
                 data, attachment.filename
             )
