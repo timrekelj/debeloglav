@@ -1,6 +1,7 @@
 """Runs scheduled tasks when they are due. Tasks live in SQLite, so they survive restarts."""
 
 import asyncio
+import itertools
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -29,7 +30,7 @@ def cron_interval(cron: str) -> timedelta:
         )
     runs = croniter(cron, datetime.now(TIMEZONE))
     times = [runs.get_next(datetime) for _ in range(6)]
-    return min(b - a for a, b in zip(times, times[1:]))
+    return min(b - a for a, b in itertools.pairwise(times))
 
 
 async def run_forever(run_task: Callable[[store.Task], Awaitable[None]]) -> None:

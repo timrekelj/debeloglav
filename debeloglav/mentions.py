@@ -29,7 +29,7 @@ async def untag(guild: discord.Guild | None, text: str) -> str:
             except discord.HTTPException:
                 pass
         name = member.display_name if member else "nekdo"
-        text = re.sub(rf"<@!?{user_id}>", lambda _: name, text)
+        text = re.sub(rf"<@!?{user_id}>", lambda _, name=name: name, text)
     role = guild.get_role if guild else lambda _: None
     text = ROLE.sub(lambda m: getattr(role(int(m[1])), "name", "vloga"), text)
     return EVERYONE.sub("@\u200b\\1", text)  # a zero-width space keeps @everyone and @here as text

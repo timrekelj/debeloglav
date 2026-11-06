@@ -164,7 +164,7 @@ async def find_member(guild: discord.Guild, who: str) -> discord.Member:
             return member
     try:
         found = await guild.query_members(query=who, limit=5)
-    except (asyncio.TimeoutError, discord.ClientException):
+    except (TimeoutError, discord.ClientException):
         found = []
     if len(found) == 1:
         return found[0]
@@ -182,9 +182,12 @@ def find_channel(
     guild: discord.Guild, name: str
 ) -> discord.abc.GuildChannel | discord.Thread:
     name = name.strip().lstrip("#").casefold()
-    if name.isdigit() and (place := guild.get_channel_or_thread(int(name))):
-        if not blocked.channel(place):
-            return place
+    if (
+        name.isdigit()
+        and (place := guild.get_channel_or_thread(int(name)))
+        and not blocked.channel(place)
+    ):
+        return place
     for place in [
         *guild.text_channels,
         *guild.threads,
