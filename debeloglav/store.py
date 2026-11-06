@@ -1,4 +1,4 @@
-"""SQLite storage for what has to survive a restart: memories, scheduled tasks and style guides."""
+"""SQLite storage for what has to survive a restart: memories, scheduled tasks, style guides and conversations."""
 
 import json
 import os
@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS blocked_channels (
     channel_id INTEGER NOT NULL,  -- a channel or category id, blocked in that server by an admin
     PRIMARY KEY (guild_id, channel_id)
 );
+CREATE TABLE IF NOT EXISTS conversations (
+    message_id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    last_used TEXT NOT NULL  -- wall-clock UTC ISO time of the session's last use
+);
+CREATE INDEX IF NOT EXISTS conversations_session ON conversations (session_id);
 """
 
 
@@ -94,7 +100,9 @@ def _connect() -> sqlite3.Connection:
 with _connect() as _db:
     _db.executescript(SCHEMA)
     # Databases created before author_id existed.
-    if "author_id" not in {row["name"] for row in _db.execute("PRAGMA table_info(memories)")}:
+    if "author_id" not in {
+        row["name"] for row in _db.execute("PRAGMA table_info(memories)")
+    }:
         _db.execute("ALTER TABLE memories ADD COLUMN author_id INTEGER")
 
 
@@ -121,7 +129,8 @@ def memory(scope: str, memory_id: int) -> Memory | None:
 def task(scope: str, task_id: int) -> Task | None:
     with _connect() as db:
         row = db.execute(
-            "SELECT * FROM tasks WHERE scope = ? AND id = ? AND active = 1", (scope, task_id)
+            "SELECT * FROM tasks WHERE scope = ? AND id = ? AND active = 1",
+            (scope, task_id),
         ).fetchone()
     return _task(row) if row else None
 
@@ -250,7 +259,9 @@ def style(scope: str) -> Style:
         enabled=bool(row["enabled"]),
         channels=json.loads(row["channels"]) if row["channels"] else None,
         guide=row["guide"],
-        learned_at=datetime.fromisoformat(row["learned_at"]) if row["learned_at"] else None,
+        learned_at=datetime.fromisoformat(row["learned_at"])
+        if row["learned_at"]
+        else None,
     )
 
 
@@ -290,7 +301,9 @@ def configure_style(
             current.guide = None  # turning learning off also deletes the learned guide
         current.learned_at = None
     if channels:
-        current.channels = [name.strip().lstrip("#").lower() for name in channels if name.strip()]
+        current.channels = [
+            name.strip().lstrip("#").lower() for name in channels if name.strip()
+        ]
     if all_channels:
         current.channels = None
     if relearn:
@@ -332,3 +345,57 @@ def all_blocked_channel_ids() -> list[int]:
     with _connect() as db:
         rows = db.execute("SELECT channel_id FROM blocked_channels").fetchall()
     return [row["channel_id"] for row in rows]
+
+
+# --- Conversations -----------------------------------------------------------------------------
+# Which Agents SDK session each Discord message belongs to, so a reply continues that conversation.
+# Kept in SQLite, so the map survives a restart; the sessions themselves are journaled on disk.
+
+
+def link_messages(session_id: str, *message_ids: int) -> None:
+    """Point the messages at their conversation's session, and mark the session used now."""
+    now = _now()
+    with _connect() as db:
+        db.executemany(
+            """INSERT INTO conversations (message_id, session_id, last_used) VALUES (?, ?, ?)
+               ON CONFLICT (message_id) DO UPDATE SET
+                 session_id = excluded.session_id, last_used = excluded.last_used""",
+            [(message_id, session_id, now) for message_id in message_ids],
+        )
+        db.execute(
+            "UPDATE conversations SET last_used = ? WHERE session_id = ?",
+            (now, session_id),
+        )
+
+
+def session_of(message_id: int) -> str | None:
+    """The session the message belongs to, if any."""
+    with _connect() as db:
+        row = db.execute(
+            "SELECT session_id FROM conversations WHERE message_id = ?", (message_id,)
+        ).fetchone()
+    return row["session_id"] if row else None
+
+
+def sessions_idle_since(cutoff: str) -> list[str]:
+    """The sessions whose last use is before the cutoff (a UTC ISO time), oldest first."""
+    with _connect() as db:
+        rows = db.execute(
+            """SELECT session_id, MAX(last_used) AS last_used FROM conversations
+               GROUP BY session_id HAVING last_used < ? ORDER BY last_used""",
+            (cutoff,),
+        ).fetchall()
+    return [row["session_id"] for row in rows]
+
+
+def delete_session_rows(session_id: str) -> None:
+    """Forget every message of the session."""
+    with _connect() as db:
+        db.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
+
+
+def session_ids() -> set[str]:
+    """Every session a stored message points at."""
+    with _connect() as db:
+        rows = db.execute("SELECT DISTINCT session_id FROM conversations").fetchall()
+    return {row["session_id"] for row in rows}

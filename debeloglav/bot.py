@@ -5,14 +5,15 @@ import functools
 import io
 import logging
 import os
-import time
-from collections import OrderedDict
-from dataclasses import dataclass
+import shutil
 from contextlib import suppress
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import discord
 from mistralai import agents
+from mistralai.agents.experimental import JsonFileSessionJournal
 
 from . import (
     blocked,
@@ -64,6 +65,10 @@ IMAGE_SUFFIXES = (
 )
 DISCORD_LIMIT = 2000
 
+# The Agents SDK sessions are journaled here, next to the database, so conversations survive a restart
+# (in Docker both land in the mounted data/ volume).
+SESSIONS_DIR = store.DB_PATH.parent / "sessions"
+
 THINKING = "🤔"  # used where the server has no THINKING_EMOTE
 THINKING_EMOTE = os.environ.get(
     "THINKING_EMOTE", "hmmmm"
@@ -78,43 +83,37 @@ ALLOWED_MENTIONS = discord.AllowedMentions(
 
 
 class Conversations:
-    """Which session each message belongs to, so a reply to Debeloglav continues that conversation."""
+    """Which session each message belongs to, so a reply to Debeloglav continues that conversation.
 
-    def __init__(self, max_messages: int = 5000) -> None:
-        self.max_messages = max_messages
-        self.by_message: OrderedDict[int, str] = OrderedDict()
-        self.last_used: dict[str, float] = {}
+    The map lives in SQLite (store.conversations), so it survives a restart; only the locks are in
+    memory. There is no cap on the number of messages: idle pruning below bounds the table, and
+    dropping a live mapping would silently split a conversation.
+    """
+
+    def __init__(self) -> None:
         self.locks: dict[str, asyncio.Lock] = {}
 
     def get(self, message_id: int | None) -> str | None:
-        return self.by_message.get(message_id) if message_id else None
+        return store.session_of(message_id) if message_id else None
 
     def link(self, session_id: str, *message_ids: int) -> None:
-        for message_id in message_ids:
-            self.by_message[message_id] = session_id
-            self.by_message.move_to_end(message_id)
-        while len(self.by_message) > self.max_messages:
-            self.by_message.popitem(last=False)
-        self.last_used[session_id] = time.monotonic()
+        store.link_messages(session_id, *message_ids)
 
     def lock(self, session_id: str) -> asyncio.Lock:
         return self.locks.setdefault(session_id, asyncio.Lock())
 
     def idle(self) -> list[str]:
         """Forget the sessions nobody used for a while, and return their ids to cancel."""
-        cutoff = time.monotonic() - SESSION_IDLE_SECONDS
+        cutoff = (datetime.now(UTC) - timedelta(seconds=SESSION_IDLE_SECONDS)).isoformat()
         stale = [
-            sid
-            for sid, used in self.last_used.items()
-            if used < cutoff and not self.lock(sid).locked()
+            session_id
+            for session_id in store.sessions_idle_since(cutoff)
+            if not self.lock(session_id).locked()
         ]
-        for sid in stale:
-            del self.last_used[sid]
-            self.locks.pop(sid, None)
-            context.forget(sid)
-        stale_set = set(stale)
-        for message_id in [m for m, sid in self.by_message.items() if sid in stale_set]:
-            del self.by_message[message_id]
+        for session_id in stale:
+            self.locks.pop(session_id, None)
+            context.forget(session_id)
+            store.delete_session_rows(session_id)
         return stale
 
 
@@ -325,6 +324,7 @@ class Debeloglav(discord.Client):
             if session is not None:
                 with suppress(Exception):
                     await session.cancel()
+                delete_journal(session.id)  # a finished research session is not continued
             if message is not None:
                 await unreact(message, RESEARCHING, self.user)
 
@@ -390,15 +390,41 @@ class Debeloglav(discord.Client):
 
     async def prune_sessions(self) -> None:
         while True:
-            await asyncio.sleep(10 * 60)
             for session_id in self.conversations.idle():
                 await self.end_session(session_id)
+            self.prune_orphan_journals()  # also once at startup, before the first sleep
+            await asyncio.sleep(10 * 60)
+
+    def prune_orphan_journals(self) -> None:
+        """Delete saved journals that no stored message points at any more.
+
+        A turn that raises before it is linked, or a crash mid-turn, leaves a journal behind.
+        A directory goes only when the conversations table does not know its session, nobody
+        holds its lock, and it has not been touched for SESSION_IDLE_SECONDS — so running
+        turns, research jobs and fresh sessions are never deleted.
+        """
+        if not SESSIONS_DIR.is_dir():
+            return
+        known = store.session_ids()
+        cutoff = datetime.now(UTC) - timedelta(seconds=SESSION_IDLE_SECONDS)
+        for entry in SESSIONS_DIR.iterdir():
+            if not entry.is_dir() or entry.name in known:
+                continue
+            lock = self.conversations.locks.get(entry.name)
+            if lock is not None and lock.locked():
+                continue
+            if datetime.fromtimestamp(entry.stat().st_mtime, UTC) > cutoff:
+                continue
+            log.info("Deleting orphaned session journal %s", entry.name)
+            delete_journal(entry.name)
 
     async def end_session(self, session_id: str) -> None:
         self.conversations.locks.pop(session_id, None)
         context.forget(session_id)
+        store.delete_session_rows(session_id)
         with suppress(Exception):
             await self.agent.session(session_id).cancel()
+        delete_journal(session_id)
 
     async def channel(self, channel_id: int) -> discord.abc.Messageable:
         channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
@@ -407,6 +433,15 @@ class Debeloglav(discord.Client):
 
 
 # --- Helpers -----------------------------------------------------------------------------------
+
+
+def delete_journal(session_id: str) -> None:
+    """Delete a session's journal directory under SESSIONS_DIR, so pruned sessions leave nothing behind."""
+    if session_id in {"", ".", ".."} or Path(session_id).name != session_id:
+        log.warning("Refusing to delete a journal for session id %r", session_id)
+        return
+    with suppress(OSError):  # already gone
+        shutil.rmtree(SESSIONS_DIR / session_id)
 
 
 def scope_of(message: discord.Message) -> str:
@@ -656,6 +691,16 @@ def split(text: str) -> list[str]:
     return chunks
 
 
+async def amain() -> None:
+    """Run the bot with every session journaled to SESSIONS_DIR, so conversations survive a restart."""
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    client = Debeloglav()
+    async with agents.local_runtime(
+        journal_factory=JsonFileSessionJournal.in_directory(SESSIONS_DIR)
+    ):
+        await client.start(os.environ["DISCORD_TOKEN"])
+
+
 def main() -> None:
     discord.utils.setup_logging()
-    Debeloglav().run(os.environ["DISCORD_TOKEN"], log_handler=None)
+    asyncio.run(amain())
