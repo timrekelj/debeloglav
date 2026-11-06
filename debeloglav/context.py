@@ -6,7 +6,7 @@ session id; the model never sees it.
 
 import os
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
 from mistralai import agents
@@ -34,6 +34,32 @@ launch_research: Callable[[Request, str], None] | None = None
 search_messages: Callable[..., Awaitable[dict[str, object]]] | None = None
 
 
+@dataclass
+class Found:
+    """What the tools of one turn found, for the bot to attach to the reply."""
+
+    sources: dict[str, str] = field(default_factory=dict)  # url -> title
+    images: list[str] = field(default_factory=list)  # generated file ids
+
+
+_found: dict[str, Found] = {}
+
+
+def record(ctx: agents.ToolCallbackContext, *, sources: dict[str, str] | None = None, image: str | None = None) -> None:
+    """Note sources or a generated image for the conversation's current turn."""
+    if ctx.session.id not in _requests:
+        return  # a session the bot does not post from, such as a research subagent
+    found = _found.setdefault(ctx.session.id, Found())
+    for url, title in (sources or {}).items():
+        found.sources.setdefault(url, title)
+    if image:
+        found.images.append(image)
+
+
+def take_found(session_id: str) -> Found:
+    return _found.pop(session_id, None) or Found()
+
+
 def register(session_id: str, request: Request) -> None:
     request.session_id = session_id
     _requests[session_id] = request
@@ -41,6 +67,7 @@ def register(session_id: str, request: Request) -> None:
 
 def forget(session_id: str) -> None:
     _requests.pop(session_id, None)
+    _found.pop(session_id, None)
 
 
 def current(ctx: agents.ToolCallbackContext) -> Request:

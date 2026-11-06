@@ -6,13 +6,15 @@ from datetime import UTC, datetime, timedelta
 from mistralai import agents
 from mistralai.client import Mistral
 from mistralai.client import models as api_models
-from pydantic import BaseModel, Field
 
 from . import context, store
 from .context import TIMEZONE
 from .scheduler import MIN_CRON_INTERVAL, cron_interval, next_cron_run
 
 MODEL = os.environ.get("MISTRAL_MODEL", "mistral-large-4")
+# The hosted web search and image generation run on a faster model: about 3x quicker than Large 4.
+TOOL_MODEL = os.environ.get("TOOL_MODEL", "mistral-medium-latest")
+REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "low") or None
 MAX_MEMORIES = 100
 MAX_TASKS = 25
 
@@ -21,23 +23,6 @@ client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
 NO_REPLY = "NO_REPLY"
 
 
-class Source(BaseModel):
-    title: str
-    url: str
-
-
-class Reply(BaseModel):
-    answer: str = Field(
-        description="The reply to post in Discord, in Discord markdown, without a sources list."
-    )
-    sources: list[Source] = Field(
-        default_factory=list,
-        description="The web pages from web_search results that back the answer, most relevant first. Empty if you did not search.",
-    )
-    images: list[str] = Field(
-        default_factory=list,
-        description="The file_id of each image from generate_image to attach to the reply. Empty if you did not generate one.",
-    )
 
 
 QUIET = agents.Builtins(skills=False, subagents=False, programmatic_tool_calling=False)
@@ -47,16 +32,16 @@ QUIET = agents.Builtins(skills=False, subagents=False, programmatic_tool_calling
 
 
 @agents.tool(model_access="direct")
-async def web_search(query: str) -> dict[str, object]:
+async def web_search(ctx: agents.ToolCallbackContext, /, query: str) -> dict[str, object]:
     """Search the web for current or factual information. Returns a summary of what was found and its sources."""
     response = await client.beta.conversations.start_async(
-        model=MODEL,
+        model=TOOL_MODEL,
         inputs=query,
         tools=[{"type": "web_search"}],
         store=False,
     )
     text: list[str] = []
-    sources: dict[str, Source] = {}
+    sources: dict[str, str] = {}  # url -> title
     for entry in response.outputs:
         if not isinstance(entry, api_models.MessageOutputEntry):
             continue
@@ -67,18 +52,20 @@ async def web_search(query: str) -> dict[str, object]:
             if isinstance(chunk, api_models.TextChunk):
                 text.append(chunk.text)
             elif isinstance(chunk, api_models.ToolReferenceChunk) and chunk.url:
-                sources.setdefault(chunk.url, Source(title=chunk.title, url=chunk.url))
+                sources.setdefault(chunk.url, chunk.title)
+    # The bot lists these under its reply, so the model never has to copy URLs.
+    context.record(ctx, sources=sources)
     return {
         "answer": "".join(text).strip(),
-        "sources": [source.model_dump() for source in sources.values()],
+        "sources": [{"title": title, "url": url} for url, title in sources.items()],
     }
 
 
 @agents.tool(model_access="direct")
-async def generate_image(prompt: str) -> dict[str, object]:
-    """Generate an image from a detailed description. Returns the file_id of each generated image."""
+async def generate_image(ctx: agents.ToolCallbackContext, /, prompt: str) -> str:
+    """Generate an image from a detailed description. The image is attached to your reply automatically."""
     response = await client.beta.conversations.start_async(
-        model=MODEL,
+        model=TOOL_MODEL,
         instructions="Use the image generation tool to create exactly the image described. Do not ask questions.",
         inputs=prompt,
         tools=[{"type": "image_generation"}],
@@ -94,7 +81,9 @@ async def generate_image(prompt: str) -> dict[str, object]:
     ]
     if not file_ids:
         raise agents.ToolError("The image could not be generated.")
-    return {"file_ids": file_ids}
+    for file_id in file_ids:
+        context.record(ctx, image=file_id)
+    return "The image is generated and will be attached to your reply."
 
 
 async def download_file(file_id: str) -> bytes:
@@ -358,12 +347,14 @@ People summon you by tagging you in a message, or by replying to your messages.
 How to behave:
 - Answer the message that tagged you. Use the rest of the conversation only as context.
 - If the tagged message is a reply with little or no question (for example "is this true?" or just a tag), fact-check or explain the message it replies to.
-- Use web_search whenever the question involves facts, news, current events, prices, people, releases, statistics or anything you are not sure about. Search more than once when one search is not enough. Verify claims before you confirm them.
-- Only cite sources that web_search returned. Never invent sources or URLs.
+- Use web_search when the answer depends on recent or changing information (news, prices, releases, results, who holds a position now), niche facts, or anything you are unsure about. Answer well-established facts and common knowledge directly, without searching.
+- Search efficiently, people are waiting: plan your queries first and call them all in the same step, so they run in parallel. One or two searches are usually enough; do at most two rounds. Never search just to find a URL to cite.
+- Don't list sources or URLs yourself: the web pages you searched are listed under your reply automatically. Never invent sources.
+- Reply with just the message to post, in Discord markdown. No JSON, no preamble.
 - Be direct and concise: a few short paragraphs at most, unless someone asks for detail. Humour is welcome, but correctness comes first.
 - If a claim is false or misleading, say so plainly and explain why.
 - People can send you images, voice messages and videos. You see images and sampled video frames directly; voice messages and video sound come to you as transcripts.
-- When someone asks you to draw, generate, create or imagine an image, call generate_image with a detailed English description, and put the returned file_id in images. Keep the text answer short then.
+- When someone asks you to draw, generate, create or imagine an image, call generate_image with a detailed English description; the image is attached to your reply automatically. Keep the text answer short then.
 - Never ping @everyone or @here.
 
 Language and tone:
@@ -372,6 +363,7 @@ Language and tone:
 - Mirror how people in this server talk: pick up their words, slang, abbreviations and humour from your style guide (when a message includes one), the recent messages and what you remember. Don't overdo it, and don't make up slang that nobody uses.
 - You learn the style guide every day from the server's messages. When asked what you learned, call show_style_guide. Admins can turn learning off, limit it to channels or make you relearn with configure_style_learning.
 - Keep facts, numbers and names exact; casual tone never means sloppy content.
+- Use emoji sparingly: at most two or three per message, even if the server uses more. Say what you have to say once, with at most one short sign-off, then stop. Never pad, repeat yourself or keep saying goodbye.
 
 Memory:
 - Each message starts with what you remember about this server. Use it naturally.
@@ -414,8 +406,8 @@ def build_agent() -> agents.Agent:
             show_style_guide,
             configure_style_learning,
         ],
-        output_type=Reply,
         builtins=QUIET,
+        reasoning_effort=REASONING_EFFORT,
         max_iterations=16,
     )
 
@@ -429,7 +421,7 @@ RESEARCH_INSTRUCTIONS = """You are Debeloglav's research lead. You get one resea
 5. Write the report: a short direct answer first, then the findings, organised with headings and bullet points, then caveats or open questions. Point out where sources disagree.
 
 Write in Slovenian, in a relaxed, friendly tone (tikaj, no stiff formal phrases), while keeping the content precise. Use Discord markdown (headings with ##, bullets, bold), no tables. Aim for 300 to 900 words.
-Only cite sources that web_search returned; list the most important ones in sources."""
+End with a "Viri" section: the 3 to 8 most important URLs from the researchers' results, as markdown links written [title](<url>). Never invent sources."""
 
 RESEARCHER_INSTRUCTIONS = """You research one sub-question on the web. Run several web_search queries from different angles, compare what you find, and check claims across sources.
 Report your findings as concise facts with numbers and dates, and list the URL of the source behind each fact. Say plainly what you could not verify."""
@@ -441,7 +433,6 @@ def build_research_agent() -> agents.Agent:
         model=MODEL,
         instructions=RESEARCH_INSTRUCTIONS,
         tools=[web_search],
-        output_type=Reply,
         # Subagents need programmatic tool calling: the lead starts them from code it writes.
         builtins=agents.Builtins(skills=False),
         max_iterations=30,

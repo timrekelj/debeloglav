@@ -52,8 +52,8 @@ Tasks are stored in SQLite (`data/debeloglav.db`) and survive restarts. Recurrin
 
 ## How it works
 
-- `debeloglav/agent.py`: the agent. `agents.Agent(model="mistral-large-4", tools=[web_search], output_type=Reply)`. The `web_search` tool calls Mistral's hosted `web_search` through the Conversations API (the pattern the Agents SDK docs recommend) and returns a summary with source URLs. The agent answers with a `Reply` (text + the sources it used).
-- `debeloglav/agent.py` also has `generate_image`, which calls the hosted `image_generation` tool and returns file ids. The agent puts them in `Reply.images` and the bot downloads and attaches them.
+- `debeloglav/agent.py`: the agent. `agents.Agent(model="mistral-large-4", tools=[web_search, ...])`. The `web_search` tool calls Mistral's hosted `web_search` through the Conversations API (the pattern the Agents SDK docs recommend) and returns a summary with source URLs. The agent answers in plain text; the sources its searches found are recorded by the tool and listed under the reply.
+- `debeloglav/agent.py` also has `generate_image`, which calls the hosted `image_generation` tool and returns file ids. The tool records the file ids, and the bot downloads and attaches them.
 - `debeloglav/agent.py` also has the memory, scheduling and research tools, and the research agent (`build_research_agent`) with its `researcher` subagent.
 - `debeloglav/media.py`: Voxtral transcription, and ffmpeg frame and audio extraction for videos.
 - `debeloglav/scheduler.py`: the loop that runs due tasks. `debeloglav/store.py`: SQLite for memories and tasks.
@@ -81,7 +81,9 @@ uv run --env-file .env python -m debeloglav
 | ------------------ | ----------------- | ------------------------------------------------------- |
 | `DISCORD_TOKEN`    | –                 | Discord bot token                                       |
 | `MISTRAL_API_KEY`  | –                 | Mistral API key                                         |
-| `MISTRAL_MODEL`    | `mistral-large-4` | Model for the agent and for web search                  |
+| `MISTRAL_MODEL`    | `mistral-large-4` | Model that writes the answers                           |
+| `TOOL_MODEL`       | `mistral-medium-latest` | Model for the hosted web search and image generation (about 3x faster than Large 4) |
+| `REASONING_EFFORT` | `low`             | How much the model thinks before normal replies: low, medium or high |
 | `CONTEXT_MESSAGES` | `10`              | How many earlier channel messages to include (0 = none) |
 | `TRANSCRIBE_MODEL` | `voxtral-mini-transcribe-3` | Model for voice messages and video sound   |
 | `VIDEO_FRAMES`     | `6`               | How many frames to sample from a video                  |

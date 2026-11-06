@@ -7,16 +7,16 @@ import logging
 import os
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from contextlib import suppress
 from datetime import datetime
 
 import discord
 from mistralai import agents
 
-from . import context, discord_search, media, scheduler, store, style
+from . import context, discord_search, guard, media, scheduler, store, style
 from .agent import (
     NO_REPLY,
-    Reply,
     build_agent,
     build_research_agent,
     download_file,
@@ -34,6 +34,8 @@ SESSION_IDLE_SECONDS = 6 * 60 * 60
 REPLY_CHAIN_DEPTH = 8
 MAX_IMAGES = 8
 MAX_SOURCES = 5
+MAX_REPLY_CHARS = 3600  # two Discord messages
+MAX_REPORT_CHARS = 7600  # four, for research reports
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
 DISCORD_LIMIT = 2000
 
@@ -145,7 +147,7 @@ class Debeloglav(discord.Client):
                 session_id, state = await self.run_turn(
                     self.agent, None, request, content
                 )
-            text, files = await render(parse(state))
+            text, files = await render(parse(state, session_id))
         except Exception:
             log.exception("Failed to answer %s", message.jump_url)
             text, files = "Ojoj, nekaj je šlo narobe. Poskusi znova čez trenutek.", []
@@ -169,6 +171,7 @@ class Debeloglav(discord.Client):
         )
         async with self.conversations.lock(session.id):
             context.register(session.id, request)
+            context.take_found(session.id)  # start the turn with nothing recorded
             state = await session.run(content)
             while isinstance(
                 state, agents.Busy
@@ -260,7 +263,7 @@ class Debeloglav(discord.Client):
                 state = await session.run(
                     f"{now_line()}\n\nResearch question from {request.user_name}:\n{question}"
                 )
-            text, files = await render(parse(state))
+            text, files = await render(parse(state), MAX_REPORT_CHARS)  # lists its own sources
         except Exception:
             log.exception("Research failed: %s", question)
             text, files = (
@@ -306,13 +309,13 @@ class Debeloglav(discord.Client):
         session_id, state = await self.run_turn(
             self.agent, None, request, [{"type": "text", "text": "\n\n".join(filter(None, prompt))}]
         )
-        reply = parse(state)
-        if reply is not None and reply.answer.strip().startswith(NO_REPLY):
+        reply = parse(state, session_id)
+        if reply is not None and reply.text.startswith(NO_REPLY):
             await self.end_session(session_id)
             return
         text, files = await render(reply)
         if task.watch and reply is not None:
-            store.set_last_report(task.id, reply.answer)
+            store.set_last_report(task.id, reply.text)
 
         mentions = discord.AllowedMentions.none()
         if task.mention:
@@ -479,24 +482,31 @@ async def recent_history(
     return [m for m in reversed(history) if m.id not in exclude]
 
 
-def parse(state: agents.TurnState) -> Reply | None:
+@dataclass
+class Answer:
+    text: str
+    found: context.Found
+
+
+def parse(state: agents.TurnState, session_id: str | None = None) -> Answer | None:
+    """The turn's reply text, with the sources and images its tools recorded."""
+    found = context.take_found(session_id) if session_id else context.Found()
     match state:
-        case agents.Completed(output=Reply() as reply):
-            return reply
-        case agents.Completed(text=raw) if raw:
-            # The model did not follow the Reply format: post its text as it is.
-            return Reply(answer=raw.strip())
+        case agents.Completed(text=text) if text or found.images:
+            return Answer((text or "").strip(), found)
         case _:
             log.warning("Turn did not complete: %r", state)
             return None
 
 
-async def render(reply: Reply | None) -> tuple[str, list[discord.File]]:
+async def render(
+    reply: Answer | None, max_chars: int = MAX_REPLY_CHARS
+) -> tuple[str, list[discord.File]]:
     if reply is None:
         return "Hmm, tole mi pa ni uspelo. Poskusi znova.", []
 
     files: list[discord.File] = []
-    for i, file_id in enumerate(dict.fromkeys(reply.images)):
+    for i, file_id in enumerate(dict.fromkeys(reply.found.images)):
         try:
             data = await download_file(file_id)
         except Exception:
@@ -504,14 +514,14 @@ async def render(reply: Reply | None) -> tuple[str, list[discord.File]]:
             continue
         files.append(discord.File(io.BytesIO(data), filename=f"debeloglav_{i + 1}.png"))
 
-    text = reply.answer.strip()
+    text = guard.cap(guard.trim_runaway(reply.text), max_chars)
     if not text and not files:
         text = "Hmm, na to nimam odgovora."
-    if reply.sources:
+    if reply.found.sources:
         # <url> stops Discord from unfurling every link into an embed.
         links = [
-            f"[{s.title.replace('[', '').replace(']', '')}](<{s.url}>)"
-            for s in reply.sources[:MAX_SOURCES]
+            f"[{title.replace('[', '').replace(']', '')}](<{url}>)"
+            for url, title in list(reply.found.sources.items())[:MAX_SOURCES]
         ]
         text += "\n-# Viri: " + " · ".join(links)
     return text, files
