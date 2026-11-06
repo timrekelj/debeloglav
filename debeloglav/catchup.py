@@ -5,7 +5,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import blocked, discord_search
+from . import blocked, discord_search, polls
 from .context import TIMEZONE, Request
 from .mentions import who
 
@@ -61,7 +61,7 @@ async def catch_up(
     links: dict[str, str] = {}
     for message in window:
         if message.author.bot or (
-            not message.clean_content and not message.attachments
+            not message.clean_content and not message.attachments and not message.poll
         ):
             continue  # counted as read, left out of the transcript
         i = len(ids) + 1
@@ -99,6 +99,8 @@ def line(message: discord.Message, i: int, ids: dict[int, int]) -> str:
             parts.append("[image]")
         else:
             parts.append(f"[attachment: {attachment.filename}]")
+    if message.poll:
+        parts.append(polls.describe(message.poll))
     text = " ".join(part for part in parts if part)
     reply = ""
     if message.reference and (j := ids.get(message.reference.message_id)):

@@ -11,6 +11,7 @@ Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-st
 - Send or reply to an **image** and ask about it: Mistral Large 4 sees images.
 - Send or reply to a **voice message** (or audio file): it's transcribed with Voxtral and answered.
 - Send or reply to a **video**: it samples frames with ffmpeg and transcribes the sound (Mistral Large 4 has no native video input), then answers about both.
+- It reads **polls** wherever it reads messages: the question, each answer with its vote count, and whether the poll ended.
 - `@Debeloglav nariši mačko v ljubljanski kavarni` → it **generates an image** (Mistral's `image_generation` tool) and attaches it to the reply.
 - It reads the reply thread and the last few channel messages for context.
 - In DMs it answers every message.

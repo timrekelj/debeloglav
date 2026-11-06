@@ -14,7 +14,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import blocked, catchup, context, discord_search, guard, media, mentions, scheduler, store, style
+from . import blocked, catchup, context, discord_search, guard, media, mentions, polls, scheduler, store, style
 from .agent import (
     NO_REPLY,
     build_agent,
@@ -477,6 +477,8 @@ def describe(message: discord.Message) -> str:
         text = " — ".join(filter(None, [embed.title, embed.description, embed.url]))
         if text:
             parts.append(f"[embed: {text}]")
+    if message.poll:
+        parts.append(polls.describe(message.poll))
     return f"{mentions.who(message.author)}: {' '.join(parts).strip()}"
 
 

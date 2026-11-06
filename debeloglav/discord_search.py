@@ -8,7 +8,7 @@ import discord
 from discord.http import Route
 from mistralai import agents
 
-from . import blocked
+from . import blocked, polls
 from .context import TIMEZONE, Request
 from .mentions import who
 
@@ -93,20 +93,21 @@ async def search(
             author_data = message["author"]
             member = guild.get_member(int(author_data["id"]))
             sent = datetime.fromisoformat(message["timestamp"]).astimezone(TIMEZONE)
-            results.append(
-                {
-                    "author": who(member)
-                    if member
-                    else f"{author_data.get('global_name') or author_data['username']} (@{author_data['username']})",
-                    "channel": f"#{place.name}",
-                    "time": f"{sent:%Y-%m-%d %H:%M}",
-                    "content": readable_content(guild, message)[:MAX_CHARS],
-                    "attachments": [
-                        a["filename"] for a in message.get("attachments", [])
-                    ],
-                    "link": f"https://discord.com/channels/{guild.id}/{message['channel_id']}/{message['id']}",
-                }
-            )
+            result = {
+                "author": who(member)
+                if member
+                else f"{author_data.get('global_name') or author_data['username']} (@{author_data['username']})",
+                "channel": f"#{place.name}",
+                "time": f"{sent:%Y-%m-%d %H:%M}",
+                "content": readable_content(guild, message)[:MAX_CHARS],
+                "attachments": [
+                    a["filename"] for a in message.get("attachments", [])
+                ],
+                "link": f"https://discord.com/channels/{guild.id}/{message['channel_id']}/{message['id']}",
+            }
+            if poll := message.get("poll"):
+                result["poll"] = polls.describe_raw(poll)
+            results.append(result)
     # Discord's total counts matches in channels the asker can't read, so it isn't passed on.
     return {
         "messages": results,

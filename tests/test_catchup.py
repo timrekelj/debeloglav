@@ -22,7 +22,9 @@ def attachment(filename, content_type=None, voice=False):
     )
 
 
-def message(id, author, content="", created_at=None, attachments=(), reply_to=None):
+def message(
+    id, author, content="", created_at=None, attachments=(), reply_to=None, poll=None
+):
     return SimpleNamespace(
         id=id,
         author=author,
@@ -30,7 +32,28 @@ def message(id, author, content="", created_at=None, attachments=(), reply_to=No
         attachments=list(attachments),
         reference=SimpleNamespace(message_id=reply_to) if reply_to else None,
         created_at=created_at or datetime(2026, 11, 6, 12, 0, tzinfo=UTC),
+        poll=poll,
     )
+
+
+def poll(
+    question="Kam gremo na pico?",
+    answers=(),
+    ended=False,
+    expires_at=None,
+    multiple=False,
+):
+    return SimpleNamespace(
+        question=question,
+        answers=list(answers),
+        is_finalized=lambda: ended,
+        expires_at=expires_at,
+        multiple=multiple,
+    )
+
+
+def poll_answer(text, count=0, emoji=None, id=1):
+    return SimpleNamespace(id=id, text=text, vote_count=count, emoji=emoji)
 
 
 class FakeChannel:
@@ -236,6 +259,40 @@ async def test_attachment_markers_and_content_cut():
     assert "[image]" in line
     assert "[attachment: doc.pdf]" in line
     assert "[voice message]" in line
+
+
+async def test_a_poll_message_is_kept_with_its_marker():
+    luka = person(7, "luka", "Luka")
+    p = poll(
+        answers=[
+            poll_answer("Pizzeria A", 5, id=1),
+            poll_answer("Pizzeria B", 2, id=2),
+        ],
+        ended=True,
+    )
+    bot, _ = setup(
+        [
+            message(105, luka, poll=p),  # a poll has empty content
+            message(104, person(ASKER, "asker"), "mine"),
+        ]
+    )
+    result = await catchup.catch_up(bot, request())
+    assert result["count"] == 1
+    assert (
+        '[poll: "Kam gremo na pico?" — Pizzeria A: 5 votes, Pizzeria B: 2 votes · ended]'
+        in result["messages"]
+    )
+
+
+async def test_an_open_poll_shows_until_when_in_local_time():
+    luka = person(7, "luka", "Luka")
+    expiry = datetime(2026, 11, 7, 18, 0, tzinfo=UTC)
+    p = poll(answers=[poll_answer("A", 1, id=1)], expires_at=expiry)
+    bot, _ = setup([message(105, luka, poll=p)])
+    result = await catchup.catch_up(bot, request(message_id=None))
+    assert (
+        f"open until {expiry.astimezone(TIMEZONE):%Y-%m-%d %H:%M}" in result["messages"]
+    )
 
 
 async def test_today_shows_only_the_time():
