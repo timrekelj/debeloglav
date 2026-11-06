@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS styles (
     guide TEXT,
     learned_at TEXT  -- NULL means learn at the next check
 );
+CREATE TABLE IF NOT EXISTS blocked_channels (
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,  -- a channel or category id, blocked in that server by an admin
+    PRIMARY KEY (guild_id, channel_id)
+);
 """
 
 
@@ -264,3 +269,66 @@ def save_style(scope: str, style: Style) -> None:
                 style.learned_at.isoformat() if style.learned_at else None,
             ),
         )
+
+
+def configure_style(
+    scope: str,
+    *,
+    enabled: bool | None = None,
+    channels: list[str] | None = None,
+    all_channels: bool = False,
+    relearn: bool = False,
+) -> Style:
+    """Change and save a server's style-learning settings, and return the saved style.
+
+    Shared by the agent's configure_style_learning tool and the /debeloglav admin commands.
+    """
+    current = style(scope)
+    if enabled is not None:
+        current.enabled = enabled
+        if not enabled:
+            current.guide = None  # turning learning off also deletes the learned guide
+        current.learned_at = None
+    if channels:
+        current.channels = [name.strip().lstrip("#").lower() for name in channels if name.strip()]
+    if all_channels:
+        current.channels = None
+    if relearn:
+        current.guide, current.learned_at = None, None
+    save_style(scope, current)
+    return current
+
+
+def block_channel(guild_id: int, channel_id: int) -> None:
+    with _connect() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO blocked_channels (guild_id, channel_id) VALUES (?, ?)",
+            (guild_id, channel_id),
+        )
+
+
+def unblock_channel(guild_id: int, channel_id: int) -> bool:
+    with _connect() as db:
+        return (
+            db.execute(
+                "DELETE FROM blocked_channels WHERE guild_id = ? AND channel_id = ?",
+                (guild_id, channel_id),
+            ).rowcount
+            > 0
+        )
+
+
+def blocked_channels(guild_id: int) -> list[int]:
+    with _connect() as db:
+        rows = db.execute(
+            "SELECT channel_id FROM blocked_channels WHERE guild_id = ? ORDER BY channel_id",
+            (guild_id,),
+        ).fetchall()
+    return [row["channel_id"] for row in rows]
+
+
+def all_blocked_channel_ids() -> list[int]:
+    """Every id blocked in any server. Channel ids are unique across Discord, so one set serves all servers."""
+    with _connect() as db:
+        rows = db.execute("SELECT channel_id FROM blocked_channels").fetchall()
+    return [row["channel_id"] for row in rows]

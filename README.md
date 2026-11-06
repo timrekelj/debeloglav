@@ -50,6 +50,18 @@ The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/styl
 
 Tasks are stored in SQLite (`data/debeloglav.db`) and survive restarts. Recurring tasks run at most every 15 minutes. Each server can have 25 tasks, each person 10. Only the person who created a task, or a server admin, can cancel it; the same goes for deleting memories.
 
+### Admin slash commands
+
+Server admins (Manage Server permission) also have the `/debeloglav` command group. Every reply is ephemeral, visible only to the admin who ran the command:
+
+- `/debeloglav nastavitve` → blocked channels (from `.env` and this server), style-learning state, number of memories and active tasks.
+- `/debeloglav blokiraj kanal` / `/debeloglav odblokiraj kanal` → block or unblock a channel, category, forum or thread on this server only. The bot then stops reading it everywhere: messages, history search and style learning. A channel blocked in `.env` can only be unblocked there.
+- `/debeloglav ucenje akcija` → `vklop` / `izklop` (also deletes the learned guide) / `znova` (learn it again) / `vsi_kanali`, with optional `kanali` to limit learning to the named channels.
+- `/debeloglav spomini` / `/debeloglav pozabi id` → list, or delete, this server's memories.
+- `/debeloglav naloge` / `/debeloglav preklici id` → list, or cancel, this server's active tasks.
+
+Per-server blocked channels are stored in SQLite (the `blocked_channels` table), so they survive restarts. Code: `debeloglav/commands.py`.
+
 ## How it works
 
 - `debeloglav/agent.py`: the agent. `agents.Agent(model="mistral-large-4", tools=[web_search, ...])`. The `web_search` tool calls Mistral's hosted `web_search` through the Conversations API (the pattern the Agents SDK docs recommend) and returns a summary with source URLs. The agent answers in plain text; the sources its searches found are recorded by the tool and listed under the reply.
@@ -66,7 +78,7 @@ Add more tools by writing a function and putting it in `tools=[...]`, or give th
 
 1. Create an application at <https://discord.com/developers/applications> and name it **Debeloglav**.
 2. **Bot** tab: reset and copy the token, and enable **Message Content Intent**.
-3. **OAuth2 → URL Generator**: scope `bot`, permissions `View Channels`, `Send Messages`, `Send Messages in Threads`, `Read Message History`, `Add Reactions`, `Attach Files`. Open the URL to invite the bot.
+3. **OAuth2 → URL Generator**: scopes `bot applications.commands`, permissions `View Channels`, `Send Messages`, `Send Messages in Threads`, `Read Message History`, `Add Reactions`, `Attach Files`. Open the URL to invite the bot. (`applications.commands` is needed for the `/debeloglav` admin commands.)
 4. Get an API key at <https://console.mistral.ai>.
 5. Configure and run (needs [uv](https://docs.astral.sh/uv/), and [ffmpeg](https://ffmpeg.org) for videos):
 
@@ -105,7 +117,7 @@ Memories, tasks and the style guide live in `data/`, so they survive rebuilds; t
 | `TIMEZONE`         | `Europe/Ljubljana` | Time zone for reminders and recurring tasks            |
 | `DB_PATH`          | `data/debeloglav.db` | SQLite file for memories and tasks                      |
 | `MAX_RESEARCH_JOBS` | `3`              | How many research jobs can run at once                  |
-| `BLOCKED_CHANNELS` | –                 | Comma-separated channel or category ids the bot never reads: it ignores messages there, and leaves them out of search and style learning |
+| `BLOCKED_CHANNELS` | –                 | Comma-separated channel or category ids the bot never reads (a global list): it ignores messages there, and leaves them out of search and style learning. Admins can also block channels per server with `/debeloglav blokiraj` (stored in the database) |
 
 Conversations and running research live in the bot's memory, so a restart ends them. Memories and scheduled tasks are kept.
 

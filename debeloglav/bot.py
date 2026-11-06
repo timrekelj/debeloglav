@@ -14,7 +14,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import blocked, context, discord_search, guard, media, mentions, scheduler, store, style
+from . import blocked, commands, context, discord_search, guard, media, mentions, scheduler, store, style
 from .agent import (
     NO_REPLY,
     build_agent,
@@ -96,6 +96,7 @@ class Debeloglav(discord.Client):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, allowed_mentions=ALLOWED_MENTIONS)
+        self.tree = discord.app_commands.CommandTree(self)
         self.agent = build_agent()
         self.research_agent = build_research_agent()
         self.conversations = Conversations()
@@ -108,6 +109,12 @@ class Debeloglav(discord.Client):
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
+        commands.setup(self.tree)
+        try:
+            synced = await self.tree.sync()
+            log.info("Synced %d slash commands", len(synced))
+        except Exception:
+            log.exception("Syncing the slash commands failed")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
