@@ -20,7 +20,7 @@ Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-st
 
 ### Conversations and memory
 
-- Reply to any of Debeloglav's messages (no tag needed) to continue that conversation: it remembers what was said. Each conversation is an Agents SDK session, kept for 6 idle hours.
+- Reply to any of Debeloglav's messages (no tag needed) to continue that conversation: it remembers what was said. Each conversation is an Agents SDK session, journaled in `data/sessions/`, so it survives a restart and is kept for 6 idle hours.
 - `@Debeloglav zapomni si, da je Tim admin` → saved for the whole server and known in every conversation. `pozabi #3` deletes it.
 
 ### Learning how the server talks
@@ -87,7 +87,7 @@ docker compose up -d --build
 docker compose logs -f            # watch it log in
 ```
 
-Memories, tasks and the style guide live in `data/`, so they survive rebuilds; to move them, copy `data/debeloglav.db` from the old machine before starting. Update with `git pull && docker compose up -d --build`. Run only one copy of the bot per token, or every message gets answered twice.
+Memories, tasks, the style guide and the conversations' sessions live in `data/`, so they survive restarts and rebuilds; to move them, copy `data/debeloglav.db` and `data/sessions/` from the old machine before starting. Update with `git pull && docker compose up -d --build`. Run only one copy of the bot per token, or every message gets answered twice.
 
 ## Configuration
 
@@ -107,6 +107,6 @@ Memories, tasks and the style guide live in `data/`, so they survive rebuilds; t
 | `MAX_RESEARCH_JOBS` | `3`              | How many research jobs can run at once                  |
 | `BLOCKED_CHANNELS` | –                 | Comma-separated channel or category ids the bot never reads: it ignores messages there, and leaves them out of search and style learning |
 
-Conversations and running research live in the bot's memory, so a restart ends them. Memories and scheduled tasks are kept.
+Conversations are saved in `data/` (the message-to-session map in SQLite, the sessions as journals in `data/sessions/`), so a restart continues them. Running research still lives in the bot's memory, so a restart ends it. Memories and scheduled tasks are kept too.
 
 Don't set an `AGENT` environment variable: the Mistral workflows config reads it and fails to start if it isn't its own config.

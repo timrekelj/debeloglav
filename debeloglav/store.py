@@ -1,4 +1,4 @@
-"""SQLite storage for what has to survive a restart: memories, scheduled tasks and style guides."""
+"""SQLite storage for what has to survive a restart: memories, scheduled tasks, style guides and conversations."""
 
 import json
 import os
@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS styles (
     guide TEXT,
     learned_at TEXT  -- NULL means learn at the next check
 );
+CREATE TABLE IF NOT EXISTS conversations (
+    message_id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    last_used TEXT NOT NULL  -- wall-clock UTC ISO time of the session's last use
+);
+CREATE INDEX IF NOT EXISTS conversations_session ON conversations (session_id);
 """
 
 
@@ -264,3 +270,50 @@ def save_style(scope: str, style: Style) -> None:
                 style.learned_at.isoformat() if style.learned_at else None,
             ),
         )
+
+
+# --- Conversations -----------------------------------------------------------------------------
+# Which Agents SDK session each Discord message belongs to, so a reply continues that conversation.
+# Kept in SQLite, so the map survives a restart; the sessions themselves are journaled on disk.
+
+
+def link_messages(session_id: str, *message_ids: int) -> None:
+    """Point the messages at their conversation's session, and mark the session used now."""
+    now = _now()
+    with _connect() as db:
+        db.executemany(
+            """INSERT INTO conversations (message_id, session_id, last_used) VALUES (?, ?, ?)
+               ON CONFLICT (message_id) DO UPDATE SET
+                 session_id = excluded.session_id, last_used = excluded.last_used""",
+            [(message_id, session_id, now) for message_id in message_ids],
+        )
+        db.execute(
+            "UPDATE conversations SET last_used = ? WHERE session_id = ?",
+            (now, session_id),
+        )
+
+
+def session_of(message_id: int) -> str | None:
+    """The session the message belongs to, if any."""
+    with _connect() as db:
+        row = db.execute(
+            "SELECT session_id FROM conversations WHERE message_id = ?", (message_id,)
+        ).fetchone()
+    return row["session_id"] if row else None
+
+
+def sessions_idle_since(cutoff: str) -> list[str]:
+    """The sessions whose last use is before the cutoff (a UTC ISO time), oldest first."""
+    with _connect() as db:
+        rows = db.execute(
+            """SELECT session_id, MAX(last_used) AS last_used FROM conversations
+               GROUP BY session_id HAVING last_used < ? ORDER BY last_used""",
+            (cutoff,),
+        ).fetchall()
+    return [row["session_id"] for row in rows]
+
+
+def delete_session_rows(session_id: str) -> None:
+    """Forget every message of the session."""
+    with _connect() as db:
+        db.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
