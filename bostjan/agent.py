@@ -25,6 +25,10 @@ class Reply(BaseModel):
         default_factory=list,
         description="The web pages from web_search results that back the answer, most relevant first. Empty if you did not search.",
     )
+    images: list[str] = Field(
+        default_factory=list,
+        description="The file_id of each image from generate_image to attach to the reply. Empty if you did not generate one.",
+    )
 
 
 @agents.tool(model_access="direct")
@@ -55,6 +59,33 @@ async def web_search(query: str) -> dict[str, object]:
     }
 
 
+@agents.tool(model_access="direct")
+async def generate_image(prompt: str) -> dict[str, object]:
+    """Generate an image from a detailed description. Returns the file_id of each generated image."""
+    response = await client.beta.conversations.start_async(
+        model=MODEL,
+        instructions="Use the image generation tool to create exactly the image described. Do not ask questions.",
+        inputs=prompt,
+        tools=[{"type": "image_generation"}],
+        store=False,
+    )
+    file_ids = [
+        chunk.file_id
+        for entry in response.outputs
+        if isinstance(entry, api_models.MessageOutputEntry) and not isinstance(entry.content, str)
+        for chunk in entry.content
+        if isinstance(chunk, api_models.ToolFileChunk)
+    ]
+    if not file_ids:
+        raise agents.ToolError("The image could not be generated.")
+    return {"file_ids": file_ids}
+
+
+async def download_file(file_id: str) -> bytes:
+    response = await client.files.download_async(file_id=file_id)
+    return await response.aread()
+
+
 INSTRUCTIONS = """You are Boštjan, a witty, sharp and helpful assistant living in a Discord server, like Grok on X.
 People summon you by tagging you in a message.
 
@@ -65,6 +96,8 @@ How to behave:
 - Only cite sources that web_search returned. Never invent sources or URLs.
 - Be direct and concise: a few short paragraphs at most, unless someone asks for detail. Light humour is welcome, but correctness comes first.
 - If a claim is false or misleading, say so plainly and explain why.
+- People can send you images, voice messages and videos. You see images and sampled video frames directly; voice messages and video sound come to you as transcripts.
+- When someone asks you to draw, generate, create or imagine an image, call generate_image with a detailed English description, and put the returned file_id in images. Keep the text answer short then.
 - Reply in the language of the person who tagged you (often Slovenian or English).
 - Never ping @everyone or @here."""
 
@@ -74,7 +107,7 @@ def build_agent() -> agents.Agent:
         name="bostjan",
         model=MODEL,
         instructions=INSTRUCTIONS,
-        tools=[web_search],
+        tools=[web_search, generate_image],
         output_type=Reply,
         builtins=agents.Builtins(
             skills=False, subagents=False, programmatic_tool_calling=False
