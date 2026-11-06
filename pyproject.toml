@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Boštjan: a Discord bot that answers when tagged, like @grok, with web research by Mistral Large 4"
 requires-python = ">=3.12,<3.15"
 dependencies = [
+    "croniter>=6.2.4",
     "discord-py>=2.7.1",
     "mistralai-agents>=1.1.0",
 ]

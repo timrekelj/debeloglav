@@ -1,15 +1,24 @@
 """Boštjan's brain: a Mistral agent that researches on the web before it answers."""
 
 import os
+from datetime import UTC, datetime, timedelta
 
 from mistralai import agents
 from mistralai.client import Mistral
 from mistralai.client import models as api_models
 from pydantic import BaseModel, Field
 
+from . import context, store
+from .context import TIMEZONE
+from .scheduler import MIN_CRON_INTERVAL, cron_interval, next_cron_run
+
 MODEL = os.environ.get("MISTRAL_MODEL", "mistral-large-4")
+MAX_MEMORIES = 100
+MAX_TASKS = 25
 
 client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
+
+NO_REPLY = "NO_REPLY"
 
 
 class Source(BaseModel):
@@ -29,6 +38,12 @@ class Reply(BaseModel):
         default_factory=list,
         description="The file_id of each image from generate_image to attach to the reply. Empty if you did not generate one.",
     )
+
+
+QUIET = agents.Builtins(skills=False, subagents=False, programmatic_tool_calling=False)
+
+
+# --- Web ---------------------------------------------------------------------------------------
 
 
 @agents.tool(model_access="direct")
@@ -72,7 +87,8 @@ async def generate_image(prompt: str) -> dict[str, object]:
     file_ids = [
         chunk.file_id
         for entry in response.outputs
-        if isinstance(entry, api_models.MessageOutputEntry) and not isinstance(entry.content, str)
+        if isinstance(entry, api_models.MessageOutputEntry)
+        and not isinstance(entry.content, str)
         for chunk in entry.content
         if isinstance(chunk, api_models.ToolFileChunk)
     ]
@@ -86,8 +102,153 @@ async def download_file(file_id: str) -> bytes:
     return await response.aread()
 
 
-INSTRUCTIONS = """You are Boštjan, a witty, sharp and helpful assistant living in a Discord server, like Grok on X.
-People summon you by tagging you in a message.
+# --- Memory ------------------------------------------------------------------------------------
+
+
+@agents.tool(model_access="direct")
+def remember(ctx: agents.ToolCallbackContext, /, fact: str) -> str:
+    """Save a lasting fact about this server or its people, to know in every future conversation."""
+    request = context.current(ctx)
+    if len(store.memories(request.scope)) >= MAX_MEMORIES:
+        raise agents.ToolError(
+            f"Memory is full ({MAX_MEMORIES} facts). Ask which facts to forget first."
+        )
+    memory_id = store.add_memory(request.scope, fact.strip(), request.user_name)
+    return f"Saved as memory #{memory_id}."
+
+
+@agents.tool(model_access="direct")
+def forget_memory(ctx: agents.ToolCallbackContext, /, memory_id: int) -> str:
+    """Delete a saved memory by its number."""
+    if not store.delete_memory(context.current(ctx).scope, memory_id):
+        raise agents.ToolError(f"There is no memory #{memory_id}.")
+    return f"Memory #{memory_id} deleted."
+
+
+def memory_prompt(scope: str) -> str:
+    saved = store.memories(scope)
+    if not saved:
+        return "What you remember about this server: nothing yet."
+    lines = "\n".join(f"#{m.id}: {m.text} (from {m.author})" for m in saved)
+    return f"What you remember about this server:\n{lines}"
+
+
+# --- Scheduling --------------------------------------------------------------------------------
+
+
+@agents.tool(model_access="direct")
+def schedule_task(
+    ctx: agents.ToolCallbackContext,
+    /,
+    prompt: str,
+    run_at: str | None = None,
+    cron: str | None = None,
+    watch: bool = False,
+    mention_creator: bool = True,
+) -> str:
+    """Schedule a task that you will run later and post in this channel: a reminder, a recurring job or a watch.
+
+    prompt: what to do when it runs, written as an instruction to yourself, with every detail needed
+        (e.g. "Remind Tim to call the dentist" or "Post a short summary of today's AI news").
+    run_at: for a one-off task, the local date and time, ISO 8601 (e.g. 2026-11-06T18:30).
+    cron: for a recurring task, a 5-field cron expression in local time (e.g. "0 8 * * 1-5").
+    watch: True for a recurring check that posts only when something new or relevant happens.
+    mention_creator: ping the person who asked when it runs (True for reminders).
+    Give exactly one of run_at and cron.
+    """
+    request = context.current(ctx)
+    if (run_at is None) == (cron is None):
+        raise agents.ToolError(
+            "Give exactly one of run_at (one-off) or cron (recurring)."
+        )
+    if len(store.tasks(request.scope)) >= MAX_TASKS:
+        raise agents.ToolError(
+            f"This server already has {MAX_TASKS} tasks. Cancel one first."
+        )
+
+    now = datetime.now(UTC)
+    if run_at is not None:
+        try:
+            when = datetime.fromisoformat(run_at)
+        except ValueError:
+            raise agents.ToolError(
+                f"{run_at!r} is not an ISO date and time, e.g. 2026-11-06T18:30."
+            ) from None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=TIMEZONE)
+        if when < now - timedelta(minutes=1):
+            raise agents.ToolError("That time is in the past.")
+        if when > now + timedelta(days=366):
+            raise agents.ToolError("Tasks can be scheduled at most a year ahead.")
+        next_run = when.astimezone(UTC)
+    else:
+        try:
+            interval = cron_interval(cron)
+        except ValueError as error:
+            raise agents.ToolError(str(error)) from None
+        if interval < MIN_CRON_INTERVAL:
+            raise agents.ToolError(
+                f"Recurring tasks can run at most every {MIN_CRON_INTERVAL.seconds // 60} minutes."
+            )
+        next_run = next_cron_run(cron, now)
+
+    task_id = store.add_task(
+        scope=request.scope,
+        channel_id=request.channel_id,
+        user_id=request.user_id,
+        user_name=request.user_name,
+        prompt=prompt.strip(),
+        cron=cron,
+        next_run=next_run,
+        watch=watch,
+        mention=mention_creator,
+    )
+    local = next_run.astimezone(TIMEZONE)
+    return f"Scheduled as task #{task_id}. Next run: {local:%A %Y-%m-%d %H:%M} ({TIMEZONE.key})."
+
+
+@agents.tool(model_access="direct")
+def list_tasks(ctx: agents.ToolCallbackContext, /) -> list[dict[str, object]]:
+    """List this server's scheduled tasks."""
+    return [
+        {
+            "id": task.id,
+            "prompt": task.prompt,
+            "schedule": task.cron or "once",
+            "next_run": f"{task.next_run.astimezone(TIMEZONE):%Y-%m-%d %H:%M}",
+            "watch": task.watch,
+            "created_by": task.user_name,
+        }
+        for task in store.tasks(context.current(ctx).scope)
+    ]
+
+
+@agents.tool(model_access="direct")
+def cancel_task(ctx: agents.ToolCallbackContext, /, task_id: int) -> str:
+    """Cancel a scheduled task by its number."""
+    if not store.cancel_task(context.current(ctx).scope, task_id):
+        raise agents.ToolError(f"There is no active task #{task_id}.")
+    return f"Task #{task_id} cancelled."
+
+
+# --- Research ----------------------------------------------------------------------------------
+
+
+@agents.tool(model_access="direct")
+async def start_research(ctx: agents.ToolCallbackContext, /, question: str) -> str:
+    """Start a deep research job in the background. The full report is posted as a reply when it is done.
+
+    question: the research question, with every detail and constraint the person gave.
+    """
+    request = context.current(ctx)
+    if context.launch_research is None or request.message_id is None:
+        raise agents.ToolError("Research can only be started from a Discord message.")
+    context.launch_research(request, question.strip())
+    return "Research started. The report will be posted as a reply to the request when it is done."
+
+
+INSTRUCTIONS = f"""You are Boštjan, a witty, sharp and helpful assistant living in a Discord server, like Grok on X.
+People summon you by tagging you in a message, or by replying to your messages.
 
 How to behave:
 - Answer the message that tagged you. Use the rest of the conversation only as context.
@@ -99,7 +260,24 @@ How to behave:
 - People can send you images, voice messages and videos. You see images and sampled video frames directly; voice messages and video sound come to you as transcripts.
 - When someone asks you to draw, generate, create or imagine an image, call generate_image with a detailed English description, and put the returned file_id in images. Keep the text answer short then.
 - Reply in the language of the person who tagged you (often Slovenian or English).
-- Never ping @everyone or @here."""
+- Never ping @everyone or @here.
+
+Memory:
+- Each message starts with what you remember about this server. Use it naturally.
+- Call remember when someone asks you to remember something, or tells you a lasting fact meant for you (names, roles, preferences, inside jokes). Don't save trivia from casual chat.
+- Call forget_memory when someone asks you to forget something.
+
+Scheduling:
+- Each message gives the current local time. Use schedule_task for reminders ("remind me in 2 hours"), recurring jobs ("every morning at 8, post the AI news") and watches ("tell me when X happens"). Convert relative times to an absolute local time. Write the task's prompt so that it makes sense on its own later.
+- After scheduling, confirm briefly with the task number and when it runs. Use list_tasks and cancel_task when asked.
+
+Background research:
+- When someone asks for deep or thorough research, a detailed comparison, or a question that needs many searches, call start_research and answer only that you are on it and will reply when done. Do not research it yourself in this turn.
+- Answer normal questions directly.
+
+Scheduled runs:
+- A message that starts with "[Scheduled task #N]" is a task you scheduled earlier. Do what it says and write the message to post.
+- For a watch, if there is nothing new or relevant since your last report, answer exactly {NO_REPLY}. When a watch has done its job and is no longer needed, call cancel_task for it."""
 
 
 def build_agent() -> agents.Agent:
@@ -107,10 +285,58 @@ def build_agent() -> agents.Agent:
         name="bostjan",
         model=MODEL,
         instructions=INSTRUCTIONS,
-        tools=[web_search, generate_image],
+        tools=[
+            web_search,
+            generate_image,
+            remember,
+            forget_memory,
+            schedule_task,
+            list_tasks,
+            cancel_task,
+            start_research,
+        ],
         output_type=Reply,
-        builtins=agents.Builtins(
-            skills=False, subagents=False, programmatic_tool_calling=False
+        builtins=QUIET,
+        max_iterations=16,
+    )
+
+
+RESEARCH_INSTRUCTIONS = """You are Boštjan's research lead. You get one research question and produce a thorough, well-sourced report.
+
+1. Split the question into 2 to 5 independent sub-questions that together cover it.
+2. Start one researcher subagent per sub-question, all at once, each with a precise task.
+3. Wait for every researcher's result before you write anything.
+4. If something important is missing or contradictory, run web_search yourself or start another researcher.
+5. Write the report: a short direct answer first, then the findings, organised with headings and bullet points, then caveats or open questions. Point out where sources disagree.
+
+Write in the language of the question. Use Discord markdown (headings with ##, bullets, bold), no tables. Aim for 300 to 900 words.
+Only cite sources that web_search returned; list the most important ones in sources."""
+
+RESEARCHER_INSTRUCTIONS = """You research one sub-question on the web. Run several web_search queries from different angles, compare what you find, and check claims across sources.
+Report your findings as concise facts with numbers and dates, and list the URL of the source behind each fact. Say plainly what you could not verify."""
+
+
+def build_research_agent() -> agents.Agent:
+    return agents.Agent(
+        name="bostjan-research",
+        model=MODEL,
+        instructions=RESEARCH_INSTRUCTIONS,
+        tools=[web_search],
+        output_type=Reply,
+        # Subagents need programmatic tool calling: the lead starts them from code it writes.
+        builtins=agents.Builtins(skills=False),
+        max_iterations=30,
+        subagents=[
+            agents.Subagent(
+                name="researcher",
+                description="Researches one sub-question on the web and reports the facts with their source URLs.",
+                instructions=RESEARCHER_INSTRUCTIONS,
+                tools=[web_search],
+                builtins=QUIET,
+                max_iterations=12,
+            )
+        ],
+        subagent_policy=agents.SubagentPolicy(
+            concurrent_child_turn_limit=5, max_depth=1
         ),
-        max_iterations=12,
     )
