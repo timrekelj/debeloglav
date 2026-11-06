@@ -9,6 +9,8 @@ MAX_TAGS = 5  # people tagged per message, so a reply can't mass-ping the server
 MAX_NAMES = 3000  # names remembered per server
 NAME_CHARS = 64
 NOT_NAMES = {"everyone", "here"}
+# Code and links keep their @ as written: "`@zoz`" or "https://x.com/@zoz" must not become a ping.
+UNTOUCHED = re.compile(r"```.*?```|`[^`\n]*`|<?https?://\S+", re.DOTALL)
 
 
 def who(user: discord.abc.User) -> str:
@@ -50,11 +52,16 @@ class People:
             for name in (member.name, member.display_name):
                 names.setdefault(name.casefold(), member.id)
 
+        untouched = [m.span() for m in UNTOUCHED.finditer(text)]
         out: list[str] = []
         tagged: set[int] = set()
         i = 0
         while (at := text.find("@", i)) != -1:
             out.append(text[i:at])
+            if span := next((sp for sp in untouched if sp[0] <= at < sp[1]), None):
+                out.append(text[at : span[1]])
+                i = span[1]
+                continue
             match = _longest(names, text, at + 1)
             before = text[at - 1] if at else " "
             if (

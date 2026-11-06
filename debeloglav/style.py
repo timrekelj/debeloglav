@@ -18,6 +18,7 @@ FIRST_WINDOW = timedelta(
     days=7
 )  # how far back the first run reads; later runs read since the last one
 CHECK_SECONDS = 15 * 60
+RETRY_AFTER = timedelta(hours=3)  # after a failed run, instead of retrying at every check
 MAX_PER_CHANNEL = 200
 MAX_MESSAGES = 1500
 MAX_CHARS = 300
@@ -45,17 +46,23 @@ Rules:
 async def run_forever(bot: discord.Client) -> None:
     """Every CHECK_SECONDS, refresh the guide of each server whose guide is older than LEARN_EVERY."""
     await bot.wait_until_ready()
+    failed_at: dict[str, datetime] = {}
     while True:
         for guild in bot.guilds:
             scope = f"guild:{guild.id}"
             style = store.style(scope)
+            now = datetime.now(UTC)
             if not style.enabled:
                 continue
-            if style.learned_at and datetime.now(UTC) - style.learned_at < LEARN_EVERY:
+            if style.learned_at and now - style.learned_at < LEARN_EVERY:
+                continue
+            if scope in failed_at and now - failed_at[scope] < RETRY_AFTER:
                 continue
             try:
                 await learn(guild, scope, style)
+                failed_at.pop(scope, None)
             except Exception:
+                failed_at[scope] = now
                 log.exception("Learning the style of %s failed", guild.name)
         await asyncio.sleep(CHECK_SECONDS)
 
@@ -74,14 +81,20 @@ async def learn(guild: discord.Guild, scope: str, style: store.Style) -> None:
 async def collect(
     guild: discord.Guild, channels: list[str] | None, since: datetime
 ) -> tuple[str, int]:
-    """The server's recent human messages, grouped by channel, oldest first."""
+    """The server's recent human messages, grouped by channel, oldest first.
+
+    Without a channel list, only channels everyone in the server can read are used: the guide is
+    shown in every channel, so it must not carry anything from private ones. An admin's explicit
+    channel list is used as given.
+    """
     sections: list[str] = []
     total = 0
     for channel in guild.text_channels:
         if channels and channel.name not in channels:
             continue
-        permissions = channel.permissions_for(guild.me)
-        if not (permissions.view_channel and permissions.read_message_history):
+        if not channels and not readable(channel, guild.default_role):
+            continue
+        if not readable(channel, guild.me):
             continue
         lines: list[str] = []
         try:
@@ -101,6 +114,11 @@ async def collect(
         if total >= MAX_MESSAGES:
             break
     return "\n\n".join(sections), total
+
+
+def readable(channel: discord.TextChannel, who: discord.Member | discord.Role) -> bool:
+    permissions = channel.permissions_for(who)
+    return permissions.view_channel and permissions.read_message_history
 
 
 async def summarize(previous: str | None, transcript: str) -> str:

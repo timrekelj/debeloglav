@@ -26,7 +26,7 @@ Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-st
 ### Learning how the server talks
 
 - Once a day it reads the server's recent messages (the last week on the first run, then everything since the last run) and updates a short **style guide**: tone, words and slang, nicknames, inside jokes, how much emoji, swearing and English, and typical phrases. Every reply uses it.
-- It describes how people talk, not what they said, and leaves out personal data. Bot messages and channels it can't read are skipped.
+- It describes how people talk, not what they said, and leaves out personal data. By default it reads only channels everyone in the server can read, because the guide is used in every channel. Bot messages are skipped. Admins can name other channels explicitly.
 - `@Debeloglav kaj si se naučil o nas?` shows the guide.
 - Admins (Manage Server permission) can change it: `uči se samo iz #general in #memes`, `uči se iz vseh kanalov`, `nauči se znova`, or `nehaj se učiti` (which also deletes the guide).
 
@@ -48,7 +48,7 @@ The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/styl
 - Watches: `@Debeloglav vsake 3 ure preveri, ali je izšel GTA 6 trailer, in mi povej` → it posts only when there's something new, and cancels itself when done.
 - `@Debeloglav katere naloge imamo?` / `prekliči nalogo #2`.
 
-Tasks are stored in SQLite (`data/debeloglav.db`) and survive restarts. Recurring tasks run at most every 15 minutes.
+Tasks are stored in SQLite (`data/debeloglav.db`) and survive restarts. Recurring tasks run at most every 15 minutes. Each server can have 25 tasks, each person 10. Only the person who created a task, or a server admin, can cancel it; the same goes for deleting memories.
 
 ## How it works
 

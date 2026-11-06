@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS memories (
     scope TEXT NOT NULL,
     text TEXT NOT NULL,
     author TEXT NOT NULL,
+    author_id INTEGER,  -- NULL for memories saved before this column existed
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tasks (
@@ -56,6 +57,7 @@ class Memory:
     id: int
     text: str
     author: str
+    author_id: int | None = None
 
 
 @dataclass
@@ -86,17 +88,37 @@ def _connect() -> sqlite3.Connection:
 
 with _connect() as _db:
     _db.executescript(SCHEMA)
+    # Databases created before author_id existed.
+    if "author_id" not in {row["name"] for row in _db.execute("PRAGMA table_info(memories)")}:
+        _db.execute("ALTER TABLE memories ADD COLUMN author_id INTEGER")
 
 
-def add_memory(scope: str, text: str, author: str) -> int:
+def add_memory(scope: str, text: str, author: str, author_id: int) -> int:
     with _connect() as db:
         return (
             db.execute(
-                "INSERT INTO memories (scope, text, author, created_at) VALUES (?, ?, ?, ?)",
-                (scope, text, author, _now()),
+                "INSERT INTO memories (scope, text, author, author_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (scope, text, author, author_id, _now()),
             ).lastrowid
             or 0
         )
+
+
+def memory(scope: str, memory_id: int) -> Memory | None:
+    with _connect() as db:
+        row = db.execute(
+            "SELECT id, text, author, author_id FROM memories WHERE scope = ? AND id = ?",
+            (scope, memory_id),
+        ).fetchone()
+    return Memory(**row) if row else None
+
+
+def task(scope: str, task_id: int) -> Task | None:
+    with _connect() as db:
+        row = db.execute(
+            "SELECT * FROM tasks WHERE scope = ? AND id = ? AND active = 1", (scope, task_id)
+        ).fetchone()
+    return _task(row) if row else None
 
 
 def delete_memory(scope: str, memory_id: int) -> bool:
@@ -112,7 +134,7 @@ def delete_memory(scope: str, memory_id: int) -> bool:
 def memories(scope: str) -> list[Memory]:
     with _connect() as db:
         rows = db.execute(
-            "SELECT id, text, author FROM memories WHERE scope = ? ORDER BY id",
+            "SELECT id, text, author, author_id FROM memories WHERE scope = ? ORDER BY id",
             (scope,),
         ).fetchall()
     return [Memory(**row) for row in rows]

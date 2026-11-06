@@ -256,11 +256,11 @@ class Debeloglav(discord.Client):
         self.research_jobs += 1
 
     async def research(self, request: Request, question: str) -> None:
-        channel = await self.channel(request.channel_id)
-        message = channel.get_partial_message(request.message_id)
-        await react(message, RESEARCHING)
-        session = None
+        message = session = None
         try:
+            channel = await self.channel(request.channel_id)
+            message = channel.get_partial_message(request.message_id)
+            await react(message, RESEARCHING)
             session = await self.research_agent.start_session()
             async with asyncio.timeout(RESEARCH_TIMEOUT):
                 state = await session.run(
@@ -278,7 +278,11 @@ class Debeloglav(discord.Client):
             if session is not None:
                 with suppress(Exception):
                     await session.cancel()
-            await unreact(message, RESEARCHING, self.user)
+            if message is not None:
+                await unreact(message, RESEARCHING, self.user)
+
+        if message is None:
+            return  # the channel is gone or unreachable: nowhere to post the report
 
         text = self.people.tag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
@@ -540,7 +544,12 @@ async def reply_chunks(
     target = message
     for i, chunk in enumerate(chunks):
         last = i == len(chunks) - 1
-        target = await target.reply(chunk or None, files=files if last else [])
+        # fail_if_not_exists=False: if the message was deleted meanwhile, post the answer anyway.
+        target = await message.channel.send(
+            chunk or None,
+            files=files if last else [],
+            reference=target.to_reference(fail_if_not_exists=False),
+        )
         sent.append(target)
     return sent
 

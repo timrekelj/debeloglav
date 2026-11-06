@@ -8,8 +8,8 @@ import discord
 from discord.http import Route
 from mistralai import agents
 
-from . import mentions
 from .context import TIMEZONE, Request
+from .mentions import who
 
 MAX_RESULTS = 25
 MAX_CHARS = 400
@@ -25,7 +25,7 @@ async def search(
     content: str | None = None,
     author: str | None = None,
     channel: str | None = None,
-    mentions: str | None = None,
+    mentioned: str | None = None,
     has: list[str] | None = None,
     after: str | None = None,
     before: str | None = None,
@@ -49,8 +49,8 @@ async def search(
         params.append(("content", content[:1024]))
     if author:
         params.append(("author_id", str((await find_member(guild, author)).id)))
-    if mentions:
-        params.append(("mentions", str((await find_member(guild, mentions)).id)))
+    if mentioned:
+        params.append(("mentions", str((await find_member(guild, mentioned)).id)))
     if channel:
         params.append(("channel_id", str(find_channel(guild, channel).id)))
     for kind in has or []:
@@ -81,8 +81,9 @@ async def search(
             "Discord is still indexing this server for search. Try again in a minute."
         )
 
+    groups = data.get("messages", [])
     results = []
-    for group in data.get("messages", []):
+    for group in groups:
         for message in group[:1]:
             place = guild.get_channel_or_thread(int(message["channel_id"]))
             # Only show what the person asking could read themselves.
@@ -93,7 +94,7 @@ async def search(
             sent = datetime.fromisoformat(message["timestamp"]).astimezone(TIMEZONE)
             results.append(
                 {
-                    "author": mentions.who(member)
+                    "author": who(member)
                     if member
                     else f"{author_data.get('global_name') or author_data['username']} (@{author_data['username']})",
                     "channel": f"#{place.name}",
@@ -105,9 +106,10 @@ async def search(
                     "link": f"https://discord.com/channels/{guild.id}/{message['channel_id']}/{message['id']}",
                 }
             )
+    # Discord's total counts matches in channels the asker can't read, so it isn't passed on.
     return {
-        "total_matches": data.get("total_results", len(results)),
         "messages": results,
+        "more_may_exist": len(groups) >= MAX_RESULTS,
     }
 
 

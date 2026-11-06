@@ -16,14 +16,12 @@ MODEL = os.environ.get("MISTRAL_MODEL", "mistral-large-4")
 TOOL_MODEL = os.environ.get("TOOL_MODEL", "mistral-medium-latest")
 REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "low") or None
 MAX_MEMORIES = 100
-MAX_TASKS = 25
+MAX_TASKS = 25  # per server
+MAX_TASKS_PER_PERSON = 10
 
 client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
 
 NO_REPLY = "NO_REPLY"
-
-
-
 
 QUIET = agents.Builtins(skills=False, subagents=False, programmatic_tool_calling=False)
 
@@ -102,15 +100,20 @@ def remember(ctx: agents.ToolCallbackContext, /, fact: str) -> str:
         raise agents.ToolError(
             f"Memory is full ({MAX_MEMORIES} facts). Ask which facts to forget first."
         )
-    memory_id = store.add_memory(request.scope, fact.strip(), request.user_name)
+    memory_id = store.add_memory(request.scope, fact.strip(), request.user_name, request.user_id)
     return f"Saved as memory #{memory_id}."
 
 
 @agents.tool(model_access="direct")
 def forget_memory(ctx: agents.ToolCallbackContext, /, memory_id: int) -> str:
-    """Delete a saved memory by its number."""
-    if not store.delete_memory(context.current(ctx).scope, memory_id):
+    """Delete a saved memory by its number. Only the person who saved it, or a server admin, may."""
+    request = context.current(ctx)
+    saved = store.memory(request.scope, memory_id)
+    if saved is None:
         raise agents.ToolError(f"There is no memory #{memory_id}.")
+    if not (request.is_admin or saved.author_id == request.user_id):
+        raise agents.ToolError(f"Only {saved.author} or a server admin can delete memory #{memory_id}.")
+    store.delete_memory(request.scope, memory_id)
     return f"Memory #{memory_id} deleted."
 
 
@@ -140,6 +143,7 @@ async def search_discord_messages(
     by_relevance: bool = False,
 ) -> dict[str, object]:
     """Search this server's message history. Returns up to 25 matching messages with author, channel, time and a link.
+    If more_may_exist is true, narrow the search (dates, channel, author) to see the rest.
 
     content: keywords to find. Keyword search, not semantic: use the words people would have typed, and try variants.
     author: who wrote it: their name, nickname, @mention or user id.
@@ -158,7 +162,7 @@ async def search_discord_messages(
         content=content,
         author=author,
         channel=channel,
-        mentions=mentions,
+        mentioned=mentions,
         has=has,
         after=after,
         before=before,
@@ -201,8 +205,8 @@ def configure_style_learning(
     """Change how you learn this server's way of talking. Only server admins may do this.
 
     enabled: turn daily learning on or off. Turning it off also deletes the learned guide.
-    channels: learn only from these channel names (without #).
-    all_channels: learn from every channel again.
+    channels: learn only from these channel names (without #). Private channels are used too when named here.
+    all_channels: learn from every channel everyone can read again (the default).
     relearn: forget the guide and learn it again from the last week, within 15 minutes.
     """
     request = context.current(ctx)
@@ -255,9 +259,14 @@ def schedule_task(
         raise agents.ToolError(
             "Give exactly one of run_at (one-off) or cron (recurring)."
         )
-    if len(store.tasks(request.scope)) >= MAX_TASKS:
+    active = store.tasks(request.scope)
+    if len(active) >= MAX_TASKS:
         raise agents.ToolError(
             f"This server already has {MAX_TASKS} tasks. Cancel one first."
+        )
+    if sum(t.user_id == request.user_id for t in active) >= MAX_TASKS_PER_PERSON:
+        raise agents.ToolError(
+            f"You already have {MAX_TASKS_PER_PERSON} tasks. Cancel one of yours first."
         )
 
     now = datetime.now(UTC)
@@ -319,9 +328,15 @@ def list_tasks(ctx: agents.ToolCallbackContext, /) -> list[dict[str, object]]:
 
 @agents.tool(model_access="direct")
 def cancel_task(ctx: agents.ToolCallbackContext, /, task_id: int) -> str:
-    """Cancel a scheduled task by its number."""
-    if not store.cancel_task(context.current(ctx).scope, task_id):
+    """Cancel a scheduled task by its number. Only the person who created it, or a server admin, may.
+    A scheduled run may cancel its own task."""
+    request = context.current(ctx)
+    task = store.task(request.scope, task_id)
+    if task is None:
         raise agents.ToolError(f"There is no active task #{task_id}.")
+    if not (request.is_admin or task.user_id == request.user_id):
+        raise agents.ToolError(f"Only {task.user_name} or a server admin can cancel task #{task_id}.")
+    store.cancel_task(request.scope, task_id)
     return f"Task #{task_id} cancelled."
 
 
