@@ -33,6 +33,9 @@ launch_research: Callable[[Request, str], None] | None = None
 # Set by the bot: searches the server's message history for a request (see discord_search.search).
 search_messages: Callable[..., Awaitable[dict[str, object]]] | None = None
 
+# Set by the bot: reads what was written in a channel since the asker last wrote there (see catchup.catch_up).
+catch_up: Callable[..., Awaitable[dict[str, object]]] | None = None
+
 
 @dataclass
 class Found:

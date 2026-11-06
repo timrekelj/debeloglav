@@ -14,7 +14,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import blocked, context, discord_search, guard, media, mentions, scheduler, store, style
+from . import blocked, catchup, context, discord_search, guard, media, mentions, scheduler, store, style
 from .agent import (
     NO_REPLY,
     build_agent,
@@ -105,6 +105,7 @@ class Debeloglav(discord.Client):
     async def setup_hook(self) -> None:
         context.launch_research = self.launch_research
         context.search_messages = functools.partial(discord_search.search, self)
+        context.catch_up = functools.partial(catchup.catch_up, self)
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
