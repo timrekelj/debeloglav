@@ -386,6 +386,7 @@ async def test_build_content_lists_the_editable_images(monkeypatch):
         reference=None,
         mentions=[],
         embeds=[],
+        poll=None,
         channel=EmptyChannel(),
     )
     request = Request(scope="dm:2", channel_id=1, user_id=2, user_name="Luka (@luka)")
