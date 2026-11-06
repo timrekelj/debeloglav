@@ -14,7 +14,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import context, discord_search, guard, media, scheduler, store, style
+from . import context, discord_search, guard, media, mentions, scheduler, store, style
 from .agent import (
     NO_REPLY,
     build_agent,
@@ -42,9 +42,9 @@ DISCORD_LIMIT = 2000
 THINKING = "🤔"
 RESEARCHING = "🔬"
 
-# Never let the model's text ping anyone; only notify the person who asked.
-ALLOWED_MENTIONS = discord.AllowedMentions.none()
-ALLOWED_MENTIONS.replied_user = True
+# Tags of people (resolved by mentions.People, at most a few per message) may ping;
+# @everyone, @here and roles never do.
+ALLOWED_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True)
 
 
 class Conversations:
@@ -98,6 +98,7 @@ class Debeloglav(discord.Client):
         self.conversations = Conversations()
         self.background: set[asyncio.Task[None]] = set()
         self.research_jobs = 0
+        self.people = mentions.People()
 
     async def setup_hook(self) -> None:
         context.launch_research = self.launch_research
@@ -118,6 +119,7 @@ class Debeloglav(discord.Client):
     # --- Answering -----------------------------------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
+        self.people.see_message(message)  # learn names, so "@Name" in a reply becomes a real tag
         if message.author.bot or not self.is_summoned(message):
             return
         parent_id = message.reference.message_id if message.reference else None
@@ -154,6 +156,7 @@ class Debeloglav(discord.Client):
         finally:
             await unreact(message, THINKING, self.user)
 
+        text = self.people.tag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
         if session_id:
             self.conversations.link(session_id, message.id, *(m.id for m in sent))
@@ -277,6 +280,7 @@ class Debeloglav(discord.Client):
                     await session.cancel()
             await unreact(message, RESEARCHING, self.user)
 
+        text = self.people.tag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
         # Replies to the report continue the conversation that asked for it.
         if request.session_id:
@@ -317,17 +321,12 @@ class Debeloglav(discord.Client):
         if task.watch and reply is not None:
             store.set_last_report(task.id, reply.text)
 
-        mentions = discord.AllowedMentions.none()
+        text = self.people.tag(getattr(channel, "guild", None), text)
         if task.mention:
             text = f"<@{task.user_id}> {text}"
-            mentions.users = [discord.Object(id=task.user_id)]
         chunks = split(text) or [""]
-        sent = [await channel.send(c, allowed_mentions=mentions) for c in chunks[:-1]]
-        sent.append(
-            await channel.send(
-                chunks[-1] or None, files=files, allowed_mentions=mentions
-            )
-        )
+        sent = [await channel.send(c) for c in chunks[:-1]]
+        sent.append(await channel.send(chunks[-1] or None, files=files))
         # People can reply to a scheduled post to follow up on it.
         self.conversations.link(session_id, *(m.id for m in sent))
 
