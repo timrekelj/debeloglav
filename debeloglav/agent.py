@@ -171,6 +171,20 @@ async def search_discord_messages(
     )
 
 
+@agents.tool(model_access="direct")
+async def catch_up(ctx: agents.ToolCallbackContext, /, channel: str | None = None) -> dict[str, object]:
+    """Read what was written in a channel since the asker last wrote there, up to 300 messages, oldest first.
+    Use it to summarize what someone missed. Returns the transcript with short message ids (m1, m2, ...)
+    and a links map from each id to that message's URL.
+
+    channel: channel name, without #. Defaults to the channel this was asked in.
+    """
+    request = context.current(ctx)
+    if context.catch_up is None:
+        raise agents.ToolError("Catch-up is not available.")
+    return await context.catch_up(request, channel=channel)
+
+
 # --- Style -------------------------------------------------------------------------------------
 
 
@@ -393,6 +407,12 @@ Server history:
 - When someone asks what was said in this server, when or who said something, or to find an old message, link or file, call search_discord_messages. Try a few keyword variants (spelling, short forms, dialect) when the first search finds nothing.
 - Quote briefly, say who said it and when, and link the message. To search by person, pass their @username as author.
 
+Catching up:
+- When someone asks what they missed, for a summary of the channel, or "kaj sem zamudil", call catch_up (with the channel name if they named one).
+- Summarize the main topics, decisions, plans and anything addressed to the asker, grouped by topic, concise. Say who said what by nickname.
+- Link the 3 to 5 key messages as markdown links [short description](<url>), taking the URLs from the links map.
+- If count is 0, say nothing happened in the channel since then.
+
 Scheduling:
 - Each message gives the current local time. Use schedule_task for reminders ("remind me in 2 hours"), recurring jobs ("every morning at 8, post the AI news") and watches ("tell me when X happens"). Convert relative times to an absolute local time. Write the task's prompt so that it makes sense on its own later.
 - After scheduling, confirm briefly with the task number and when it runs. Use list_tasks and cancel_task when asked.
@@ -421,6 +441,7 @@ def build_agent() -> agents.Agent:
             cancel_task,
             start_research,
             search_discord_messages,
+            catch_up,
             show_style_guide,
             configure_style_learning,
         ],

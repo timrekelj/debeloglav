@@ -37,6 +37,10 @@ The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/styl
 - `@Debeloglav kdaj je @Luka rekel, da je pizza overrated?`, `kdo je poslal tisti link do Steama?`, `poišči slike iz #izlet od marca` → it searches the server's messages with Discord's search, and answers with quotes, who, when and links to the messages.
 - It only shows messages from channels the person asking can read, and skips age-restricted channels.
 
+### Catching up
+
+- `@Debeloglav kaj sem zamudil?` or `kaj sem zamudil v #general?` → it reads the channel since your last message there (up to 300 messages) and summarizes what you missed: the main topics, decisions, plans and anything addressed to you, with links to the key messages. If you haven't written there recently, it covers the last 300 messages. Code: `debeloglav/catchup.py`.
+
 ### Background research
 
 - `@Debeloglav razišči podrobno …` → it answers that it's on it, reacts with 🔬, and a research lead agent splits the question and runs up to 5 researcher subagents in parallel. When the report is ready it's posted as a reply to your message and the 🔬 is removed. Reply to the report to ask follow-ups.
