@@ -14,7 +14,20 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import blocked, catchup, context, discord_search, guard, media, mentions, polls, scheduler, store, style
+from . import (
+    blocked,
+    catchup,
+    commands,
+    context,
+    discord_search,
+    guard,
+    media,
+    mentions,
+    polls,
+    scheduler,
+    store,
+    style,
+)
 from .agent import (
     NO_REPLY,
     build_agent,
@@ -38,16 +51,30 @@ MAX_REPLY_CHARS = 3600  # two Discord messages
 MAX_REPORT_CHARS = 7600  # four, for research reports
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
 MAX_DOCUMENT_CHARS = 40_000  # about 10k tokens of a document's text in the prompt
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif", ".avif")
+IMAGE_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".heic",
+    ".heif",
+    ".avif",
+)
 DISCORD_LIMIT = 2000
 
 THINKING = "🤔"  # used where the server has no THINKING_EMOTE
-THINKING_EMOTE = os.environ.get("THINKING_EMOTE", "hmmmm")  # the server's custom emote, by name
+THINKING_EMOTE = os.environ.get(
+    "THINKING_EMOTE", "hmmmm"
+)  # the server's custom emote, by name
 RESEARCHING = "🔬"
 
 # The bot doesn't tag anyone. Only a reply pings the person it answers, and a reminder the person
 # who set it.
-ALLOWED_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=False, replied_user=True)
+ALLOWED_MENTIONS = discord.AllowedMentions(
+    everyone=False, roles=False, users=False, replied_user=True
+)
 
 
 class Conversations:
@@ -96,6 +123,7 @@ class Debeloglav(discord.Client):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, allowed_mentions=ALLOWED_MENTIONS)
+        self.tree = discord.app_commands.CommandTree(self)
         self.agent = build_agent()
         self.research_agent = build_research_agent()
         self.conversations = Conversations()
@@ -109,6 +137,12 @@ class Debeloglav(discord.Client):
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
+        commands.setup(self.tree)
+        try:
+            synced = await self.tree.sync()
+            log.info("Synced %d slash commands", len(synced))
+        except Exception:
+            log.exception("Syncing the slash commands failed")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
@@ -212,7 +246,11 @@ class Debeloglav(discord.Client):
     async def build_content(
         self, message: discord.Message, request: Request, *, continuing: bool
     ) -> list[dict[str, str]]:
-        sections = [now_line(), memory_prompt(request.scope), style_prompt(request.scope)]
+        sections = [
+            now_line(),
+            memory_prompt(request.scope),
+            style_prompt(request.scope),
+        ]
         if continuing:
             # The session already has the conversation; add only what this message replies to.
             chain = await reply_chain(message, depth=1)
@@ -235,8 +273,7 @@ class Debeloglav(discord.Client):
         mentioned = [u for u in message.mentions if u != self.user]
         if mentioned:
             sections.append(
-                "People it mentions: "
-                + ", ".join(mentions.who(u) for u in mentioned)
+                "People it mentions: " + ", ".join(mentions.who(u) for u in mentioned)
             )
 
         # Media from the tagged message and the one it replies to, so "what is this?" works.
@@ -247,7 +284,10 @@ class Debeloglav(discord.Client):
                 await read_attachment(source, attachment, images, notes)
         sections.extend(notes)
 
-        return [{"type": "text", "text": "\n\n".join(filter(None, sections))}, *images[:MAX_IMAGES]]
+        return [
+            {"type": "text", "text": "\n\n".join(filter(None, sections))},
+            *images[:MAX_IMAGES],
+        ]
 
     # --- Background research -------------------------------------------------------------------
 
@@ -271,7 +311,9 @@ class Debeloglav(discord.Client):
                 state = await session.run(
                     f"{now_line()}\n\nResearch question from {request.user_name}:\n{question}"
                 )
-            text, files = await render(parse(state), MAX_REPORT_CHARS)  # lists its own sources
+            text, files = await render(
+                parse(state), MAX_REPORT_CHARS
+            )  # lists its own sources
         except Exception:
             log.exception("Research failed: %s", question)
             text, files = (
@@ -320,7 +362,10 @@ class Debeloglav(discord.Client):
         prompt.append(f"Task: {task.prompt}")
 
         session_id, state = await self.run_turn(
-            self.agent, None, request, [{"type": "text", "text": "\n\n".join(filter(None, prompt))}]
+            self.agent,
+            None,
+            request,
+            [{"type": "text", "text": "\n\n".join(filter(None, prompt))}],
         )
         reply = parse(state, session_id)
         if reply is not None and reply.text.startswith(NO_REPLY):
@@ -337,7 +382,9 @@ class Debeloglav(discord.Client):
             pings = discord.AllowedMentions(users=[discord.Object(task.user_id)])
         chunks = split(text) or [""]
         sent = [await channel.send(c, allowed_mentions=pings) for c in chunks[:-1]]
-        sent.append(await channel.send(chunks[-1] or None, files=files, allowed_mentions=pings))
+        sent.append(
+            await channel.send(chunks[-1] or None, files=files, allowed_mentions=pings)
+        )
         # People can reply to a scheduled post to follow up on it.
         self.conversations.link(session_id, *(m.id for m in sent))
 
@@ -415,12 +462,18 @@ async def read_attachment(
             uri = await media.image(await attachment.read(), attachment.filename)
         except Exception:
             log.exception("Could not read image %s", attachment.filename)
-            notes.append(f"[{who} sent the image {attachment.filename}, but it could not be opened]")
+            notes.append(
+                f"[{who} sent the image {attachment.filename}, but it could not be opened]"
+            )
             return
         images.append({"type": "image", "uri": uri, "mediaType": "image/jpeg"})
         return
     document = media.is_document(attachment.filename, attachment.content_type)
-    if kind not in ("audio", "video") and not attachment.is_voice_message() and not document:
+    if (
+        kind not in ("audio", "video")
+        and not attachment.is_voice_message()
+        and not document
+    ):
         return
     if attachment.size > MAX_MEDIA_BYTES:
         notes.append(f"[{who} sent {attachment.filename}, too large to process]")
@@ -431,7 +484,10 @@ async def read_attachment(
         if document:
             text = await media.document_text(data, attachment.filename)
             if len(text) > MAX_DOCUMENT_CHARS:
-                text = text[:MAX_DOCUMENT_CHARS] + "\n[… the rest of the document is cut off]"
+                text = (
+                    text[:MAX_DOCUMENT_CHARS]
+                    + "\n[… the rest of the document is cut off]"
+                )
             notes.append(
                 f"[Document {attachment.filename} from {who}, its text:\n{text or '(no text)'}\n]"
             )

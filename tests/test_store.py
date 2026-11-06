@@ -74,3 +74,39 @@ def test_style_defaults_and_saving():
     )
     store.save_style("guild:style1", store.Style())
     assert store.style("guild:style1") == store.Style()
+
+
+def test_configure_style():
+    scope = "guild:style2"
+    learned = datetime(2026, 11, 1, tzinfo=UTC)
+    store.save_style(scope, store.Style(True, ["general"], "## Ton", learned))
+    # turning learning off also deletes the guide and learned_at
+    saved = store.configure_style(scope, enabled=False)
+    assert saved == store.Style(False, ["general"], None, None)
+    assert store.style(scope) == saved
+    # channel names are stripped of # and lowercased
+    saved = store.configure_style(scope, enabled=True, channels=["#General", " MEMES "])
+    assert saved.enabled and saved.channels == ["general", "memes"]
+    # relearn clears the guide and learned_at, but keeps the settings
+    store.save_style(scope, store.Style(True, ["general"], "## Ton", learned))
+    saved = store.configure_style(scope, relearn=True)
+    assert saved == store.Style(True, ["general"], None, None)
+    # all_channels clears the channel list
+    saved = store.configure_style(scope, channels=["general"], all_channels=True)
+    assert saved.channels is None
+
+
+def test_blocked_channels_per_server():
+    store.block_channel(11, 500)
+    store.block_channel(11, 501)
+    store.block_channel(12, 502)
+    assert store.blocked_channels(11) == [500, 501]
+    assert store.blocked_channels(12) == [502]
+    assert store.blocked_channels(13) == []
+    store.block_channel(11, 500)  # blocking again changes nothing
+    assert store.blocked_channels(11) == [500, 501]
+    assert 502 in store.all_blocked_channel_ids()
+    assert not store.unblock_channel(11, 502)  # blocked in another server
+    assert store.unblock_channel(11, 500)
+    assert store.blocked_channels(11) == [501]
+    assert not store.unblock_channel(11, 500)  # already unblocked

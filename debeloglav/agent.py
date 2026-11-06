@@ -228,21 +228,15 @@ def configure_style_learning(
         raise agents.ToolError("Style learning only works in a server.")
     if not request.is_admin:
         raise agents.ToolError("Only server admins (Manage Server permission) can change this.")
-    style = store.style(request.scope)
-    if enabled is not None:
-        style.enabled = enabled
-        if not enabled:
-            style.guide = None
-        style.learned_at = None
-    if channels:
-        style.channels = [name.strip().lstrip("#").lower() for name in channels if name.strip()]
-    if all_channels:
-        style.channels = None
-    if relearn:
-        style.guide, style.learned_at = None, None
-    store.save_style(request.scope, style)
-    where = ", ".join(f"#{name}" for name in style.channels) if style.channels else "all channels"
-    return f"Style learning is {'on' if style.enabled else 'off'}, from {where}."
+    saved = store.configure_style(
+        request.scope,
+        enabled=enabled,
+        channels=channels,
+        all_channels=all_channels,
+        relearn=relearn,
+    )
+    where = ", ".join(f"#{name}" for name in saved.channels) if saved.channels else "all channels"
+    return f"Style learning is {'on' if saved.enabled else 'off'}, from {where}."
 
 
 # --- Scheduling --------------------------------------------------------------------------------
