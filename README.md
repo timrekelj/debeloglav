@@ -90,6 +90,7 @@ uv run --env-file .env python -m debeloglav
 | `TIMEZONE`         | `Europe/Ljubljana` | Time zone for reminders and recurring tasks            |
 | `DB_PATH`          | `data/debeloglav.db` | SQLite file for memories and tasks                      |
 | `MAX_RESEARCH_JOBS` | `3`              | How many research jobs can run at once                  |
+| `BLOCKED_CHANNELS` | –                 | Comma-separated channel or category ids the bot never reads: it ignores messages there, and leaves them out of search and style learning |
 
 Conversations and running research live in the bot's memory, so a restart ends them. Memories and scheduled tasks are kept.
 

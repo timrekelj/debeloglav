@@ -14,7 +14,7 @@ from datetime import datetime
 import discord
 from mistralai import agents
 
-from . import context, discord_search, guard, media, mentions, scheduler, store, style
+from . import blocked, context, discord_search, guard, media, mentions, scheduler, store, style
 from .agent import (
     NO_REPLY,
     build_agent,
@@ -43,9 +43,9 @@ THINKING = "🤔"  # used where the server has no THINKING_EMOTE
 THINKING_EMOTE = os.environ.get("THINKING_EMOTE", "hmmmm")  # the server's custom emote, by name
 RESEARCHING = "🔬"
 
-# Tags of people (resolved by mentions.People) may ping;
-# @everyone, @here and roles never do.
-ALLOWED_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True)
+# The bot doesn't tag anyone. Only a reply pings the person it answers, and a reminder the person
+# who set it.
+ALLOWED_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=False, replied_user=True)
 
 
 class Conversations:
@@ -99,11 +99,10 @@ class Debeloglav(discord.Client):
         self.conversations = Conversations()
         self.background: set[asyncio.Task[None]] = set()
         self.research_jobs = 0
-        self.people = mentions.People()
 
     async def setup_hook(self) -> None:
         context.launch_research = self.launch_research
-        context.search_messages = functools.partial(discord_search.search, self, self.people)
+        context.search_messages = functools.partial(discord_search.search, self)
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
@@ -120,7 +119,8 @@ class Debeloglav(discord.Client):
     # --- Answering -----------------------------------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
-        self.people.see_message(message)  # learn usernames, so "@username" in a reply becomes a real tag
+        if blocked.channel(message.channel):
+            return  # the bot doesn't read these channels at all
         if message.author.bot or not self.is_summoned(message):
             return
         parent_id = message.reference.message_id if message.reference else None
@@ -158,7 +158,7 @@ class Debeloglav(discord.Client):
         finally:
             await unreact(message, thinking, self.user)
 
-        text = await self.people.tag(getattr(message, "guild", None), text)
+        text = await mentions.untag(message.guild, text)
         sent = await reply_chunks(message, text, files)
         if session_id:
             self.conversations.link(session_id, message.id, *(m.id for m in sent))
@@ -218,8 +218,6 @@ class Debeloglav(discord.Client):
         else:
             chain = await reply_chain(message, depth=REPLY_CHAIN_DEPTH)
             history = await recent_history(message, exclude={m.id for m in chain})
-            for seen in [*history, *chain]:
-                self.people.see_message(seen)  # the model may tag anyone it is shown
             if history:
                 sections.append(
                     "Recent messages in the channel (oldest first):\n"
@@ -235,7 +233,7 @@ class Debeloglav(discord.Client):
         if mentioned:
             sections.append(
                 "People it mentions: "
-                + ", ".join(f"{mentions.who(u)}, id {u.id}" for u in mentioned)
+                + ", ".join(mentions.who(u) for u in mentioned)
             )
 
         # Media from the tagged message and the one it replies to, so "what is this?" works.
@@ -288,7 +286,7 @@ class Debeloglav(discord.Client):
         if message is None:
             return  # the channel is gone or unreachable: nowhere to post the report
 
-        text = await self.people.tag(getattr(message, "guild", None), text)
+        text = await mentions.untag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
         # Replies to the report continue the conversation that asked for it.
         if request.session_id:
@@ -329,12 +327,14 @@ class Debeloglav(discord.Client):
         if task.watch and reply is not None:
             store.set_last_report(task.id, reply.text)
 
-        text = await self.people.tag(getattr(channel, "guild", None), text)
+        text = await mentions.untag(getattr(channel, "guild", None), text)
+        pings = discord.AllowedMentions.none()
         if task.mention:
             text = f"<@{task.user_id}> {text}"
+            pings = discord.AllowedMentions(users=[discord.Object(task.user_id)])
         chunks = split(text) or [""]
-        sent = [await channel.send(c) for c in chunks[:-1]]
-        sent.append(await channel.send(chunks[-1] or None, files=files))
+        sent = [await channel.send(c, allowed_mentions=pings) for c in chunks[:-1]]
+        sent.append(await channel.send(chunks[-1] or None, files=files, allowed_mentions=pings))
         # People can reply to a scheduled post to follow up on it.
         self.conversations.link(session_id, *(m.id for m in sent))
 

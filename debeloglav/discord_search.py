@@ -8,8 +8,9 @@ import discord
 from discord.http import Route
 from mistralai import agents
 
+from . import blocked
 from .context import TIMEZONE, Request
-from .mentions import People, who
+from .mentions import who
 
 MAX_RESULTS = 25
 MAX_CHARS = 400
@@ -20,7 +21,6 @@ HAS_TYPES = {"image", "sound", "video", "file", "sticker", "embed", "link", "pol
 
 async def search(
     bot: discord.Client,
-    people: People,
     request: Request,
     *,
     content: str | None = None,
@@ -88,12 +88,10 @@ async def search(
         for message in group[:1]:
             place = guild.get_channel_or_thread(int(message["channel_id"]))
             # Only show what the person asking could read themselves.
-            if place is None or not readable(place, asker):
+            if place is None or not readable(place, asker) or blocked.channel(place):
                 continue
             author_data = message["author"]
             member = guild.get_member(int(author_data["id"]))
-            for user in [author_data, *message.get("mentions", [])]:
-                people.learn(guild.id, int(user["id"]), user["username"])  # the model may tag them
             sent = datetime.fromisoformat(message["timestamp"]).astimezone(TIMEZONE)
             results.append(
                 {
@@ -184,14 +182,15 @@ def find_channel(
 ) -> discord.abc.GuildChannel | discord.Thread:
     name = name.strip().lstrip("#").casefold()
     if name.isdigit() and (place := guild.get_channel_or_thread(int(name))):
-        return place
+        if not blocked.channel(place):
+            return place
     for place in [
         *guild.text_channels,
         *guild.threads,
         *guild.forums,
         *guild.voice_channels,
     ]:
-        if place.name.casefold() == name:
+        if place.name.casefold() == name and not blocked.channel(place):
             return place
     raise agents.ToolError(f"There is no channel called #{name}.")
 

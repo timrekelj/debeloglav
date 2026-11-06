@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import discord
 from mistralai.client import models as api_models
 
-from . import store
+from . import blocked, store
 from .agent import MODEL, client
 from .mentions import who
 
@@ -94,7 +94,7 @@ async def collect(
             continue
         if not channels and not readable(channel, guild.default_role):
             continue
-        if not readable(channel, guild.me):
+        if not readable(channel, guild.me) or blocked.channel(channel):
             continue
         lines: list[str] = []
         try:
