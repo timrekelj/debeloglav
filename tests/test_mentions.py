@@ -59,7 +59,7 @@ async def test_role_tags_become_names():
 async def test_everyone_and_here_never_ping():
     text = await mentions.untag(FakeGuild(), "@everyone in @here!")
     assert "@everyone" not in text and "@here" not in text
-    assert text.replace("​", "") == "@everyone in @here!"
+    assert text.replace("\u200b", "") == "@everyone in @here!"
 
 
 async def test_email_addresses_are_left_alone():
