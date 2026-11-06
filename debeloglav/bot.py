@@ -1,4 +1,4 @@
-"""Boštjan on Discord: answers every message that tags it, as a reply to that message."""
+"""Debeloglav on Discord: answers every message that tags it, as a reply to that message."""
 
 import asyncio
 import io
@@ -23,7 +23,7 @@ from .agent import (
 )
 from .context import TIMEZONE, Request
 
-log = logging.getLogger("bostjan")
+log = logging.getLogger("debeloglav")
 
 CONTEXT_MESSAGES = int(os.environ.get("CONTEXT_MESSAGES", "10"))
 MAX_RESEARCH_JOBS = int(os.environ.get("MAX_RESEARCH_JOBS", "3"))
@@ -44,7 +44,7 @@ ALLOWED_MENTIONS.replied_user = True
 
 
 class Conversations:
-    """Which session each message belongs to, so a reply to Boštjan continues that conversation."""
+    """Which session each message belongs to, so a reply to Debeloglav continues that conversation."""
 
     def __init__(self, max_messages: int = 5000) -> None:
         self.max_messages = max_messages
@@ -84,7 +84,7 @@ class Conversations:
         return stale
 
 
-class Bostjan(discord.Client):
+class Debeloglav(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -185,7 +185,7 @@ class Bostjan(discord.Client):
                 and reference.resolved.author == self.user
             )
         ):
-            return True  # a reply to Boštjan continues the conversation, even without a ping
+            return True  # a reply to Debeloglav continues the conversation, even without a ping
         # Tagging the bot's managed role from autocomplete also counts.
         return any(
             role.tags and role.tags.bot_id == self.user.id
@@ -489,7 +489,7 @@ async def render(reply: Reply | None) -> tuple[str, list[discord.File]]:
         except Exception:
             log.exception("Could not download generated image %s", file_id)
             continue
-        files.append(discord.File(io.BytesIO(data), filename=f"bostjan_{i + 1}.png"))
+        files.append(discord.File(io.BytesIO(data), filename=f"debeloglav_{i + 1}.png"))
 
     text = reply.answer.strip()
     if not text and not files:
@@ -540,4 +540,4 @@ def split(text: str) -> list[str]:
 
 def main() -> None:
     discord.utils.setup_logging()
-    Bostjan().run(os.environ["DISCORD_TOKEN"], log_handler=None)
+    Debeloglav().run(os.environ["DISCORD_TOKEN"], log_handler=None)

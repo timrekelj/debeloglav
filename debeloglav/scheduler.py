@@ -10,7 +10,7 @@ from croniter import croniter
 from . import store
 from .context import TIMEZONE
 
-log = logging.getLogger("bostjan.scheduler")
+log = logging.getLogger("debeloglav.scheduler")
 
 MIN_CRON_INTERVAL = timedelta(minutes=15)
 POLL_SECONDS = 30

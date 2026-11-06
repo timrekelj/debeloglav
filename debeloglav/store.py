@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("DB_PATH", "data/bostjan.db"))
+DB_PATH = Path(os.environ.get("DB_PATH", "data/debeloglav.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (

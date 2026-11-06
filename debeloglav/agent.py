@@ -1,4 +1,4 @@
-"""Boštjan's brain: a Mistral agent that researches on the web before it answers."""
+"""Debeloglav's brain: a Mistral agent that researches on the web before it answers."""
 
 import os
 from datetime import UTC, datetime, timedelta
@@ -247,7 +247,7 @@ async def start_research(ctx: agents.ToolCallbackContext, /, question: str) -> s
     return "Research started. The report will be posted as a reply to the request when it is done."
 
 
-INSTRUCTIONS = f"""You are Boštjan, a witty, sharp and helpful assistant living in a Discord server, like Grok on X.
+INSTRUCTIONS = f"""You are Debeloglav, a witty, sharp and helpful assistant living in a Discord server, like Grok on X.
 People summon you by tagging you in a message, or by replying to your messages.
 
 How to behave:
@@ -282,7 +282,7 @@ Scheduled runs:
 
 def build_agent() -> agents.Agent:
     return agents.Agent(
-        name="bostjan",
+        name="debeloglav",
         model=MODEL,
         instructions=INSTRUCTIONS,
         tools=[
@@ -301,7 +301,7 @@ def build_agent() -> agents.Agent:
     )
 
 
-RESEARCH_INSTRUCTIONS = """You are Boštjan's research lead. You get one research question and produce a thorough, well-sourced report.
+RESEARCH_INSTRUCTIONS = """You are Debeloglav's research lead. You get one research question and produce a thorough, well-sourced report.
 
 1. Split the question into 2 to 5 independent sub-questions that together cover it.
 2. Start one researcher subagent per sub-question, all at once, each with a precise task.
@@ -318,7 +318,7 @@ Report your findings as concise facts with numbers and dates, and list the URL o
 
 def build_research_agent() -> agents.Agent:
     return agents.Agent(
-        name="bostjan-research",
+        name="debeloglav-research",
         model=MODEL,
         instructions=RESEARCH_INSTRUCTIONS,
         tools=[web_search],
