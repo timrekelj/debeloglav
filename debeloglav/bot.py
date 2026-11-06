@@ -342,9 +342,33 @@ class Debeloglav(discord.Client):
 
     async def prune_sessions(self) -> None:
         while True:
-            await asyncio.sleep(10 * 60)
             for session_id in self.conversations.idle():
                 await self.end_session(session_id)
+            self.prune_orphan_journals()  # also once at startup, before the first sleep
+            await asyncio.sleep(10 * 60)
+
+    def prune_orphan_journals(self) -> None:
+        """Delete saved journals that no stored message points at any more.
+
+        A turn that raises before it is linked, or a crash mid-turn, leaves a journal behind.
+        A directory goes only when the conversations table does not know its session, nobody
+        holds its lock, and it has not been touched for SESSION_IDLE_SECONDS — so running
+        turns, research jobs and fresh sessions are never deleted.
+        """
+        if not SESSIONS_DIR.is_dir():
+            return
+        known = store.session_ids()
+        cutoff = datetime.now(UTC) - timedelta(seconds=SESSION_IDLE_SECONDS)
+        for entry in SESSIONS_DIR.iterdir():
+            if not entry.is_dir() or entry.name in known:
+                continue
+            lock = self.conversations.locks.get(entry.name)
+            if lock is not None and lock.locked():
+                continue
+            if datetime.fromtimestamp(entry.stat().st_mtime, UTC) > cutoff:
+                continue
+            log.info("Deleting orphaned session journal %s", entry.name)
+            delete_journal(entry.name)
 
     async def end_session(self, session_id: str) -> None:
         self.conversations.locks.pop(session_id, None)

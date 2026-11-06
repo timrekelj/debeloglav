@@ -317,3 +317,10 @@ def delete_session_rows(session_id: str) -> None:
     """Forget every message of the session."""
     with _connect() as db:
         db.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
+
+
+def session_ids() -> set[str]:
+    """Every session a stored message points at."""
+    with _connect() as db:
+        rows = db.execute("SELECT DISTINCT session_id FROM conversations").fetchall()
+    return {row["session_id"] for row in rows}

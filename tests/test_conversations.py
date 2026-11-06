@@ -1,6 +1,9 @@
 """The message-to-session map in SQLite, and the Conversations that read and write it."""
 
 import asyncio
+import os
+import shutil
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -116,3 +119,33 @@ async def test_end_session_forgets_rows_and_journal():
         await client.end_session("end-s1")
     assert client.conversations.get(701) is None
     assert not journal.exists()
+
+
+async def test_prune_orphan_journals_deletes_only_old_unknown_dirs():
+    client = bot.Debeloglav()
+    sessions = bot.SESSIONS_DIR
+    sessions.mkdir(parents=True, exist_ok=True)
+    old_unknown = sessions / "old-unknown"
+    fresh_unknown = sessions / "fresh-unknown"
+    old_known = sessions / "old-known"
+    locked_unknown = sessions / "locked-unknown"
+    for directory in (old_unknown, fresh_unknown, old_known, locked_unknown):
+        directory.mkdir(exist_ok=True)
+        (directory / "session.json").write_text("{}")
+    client.conversations.link("old-known", 801)  # the table knows this session
+    old = time.time() - bot.SESSION_IDLE_SECONDS - 60
+    for directory in (old_unknown, old_known, locked_unknown):
+        os.utime(directory, (old, old))  # as if last touched over 6 hours ago
+    lock = client.conversations.lock("locked-unknown")
+    await lock.acquire()  # a turn is running in that session
+    try:
+        client.prune_orphan_journals()
+        assert not old_unknown.exists()  # old and unknown: its journal is deleted
+        assert fresh_unknown.exists()  # too fresh to touch
+        assert old_known.exists()  # still known to the table
+        assert locked_unknown.exists()  # locked: a turn may be running in it
+    finally:
+        lock.release()
+    client.prune_orphan_journals()
+    assert not locked_unknown.exists()  # unlocked now, so it goes too
+    shutil.rmtree(sessions, ignore_errors=True)
