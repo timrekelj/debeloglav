@@ -8,6 +8,10 @@ STEP = 100
 # Normal text, even emoji-heavy, compresses about 1.5-2.5x per window; a loop that repeats
 # the same few tokens compresses far more.
 LOOP_RATIO = 3.2
+# A window only counts as a loop when the same text also repeats verbatim several times
+# in a row (a run of 20+ characters, or the same line). Templated lists, where only the
+# numbers differ from line to line, compress well but are not loops.
+VERBATIM_REPEAT = re.compile(r"([\s\S]{20,}?)\1{2,}")
 
 
 def _ratio(text: str) -> float:
@@ -15,12 +19,24 @@ def _ratio(text: str) -> float:
     return len(data) / max(1, len(zlib.compress(data, 9)))
 
 
+def _repeats_verbatim(window: str) -> bool:
+    """True when the window repeats the same chunk of text verbatim, in a row."""
+    if VERBATIM_REPEAT.search(window):
+        return True
+    lines = window.split("\n")
+    return any(
+        line and line == lines[i + 1] == lines[i + 2]
+        for i, line in enumerate(lines[:-2])
+    )
+
+
 def trim_runaway(text: str) -> str:
     """Cut the answer where it starts looping, at the last sentence end before the loop."""
     if len(text) < 2 * WINDOW:
         return text
     for start in range(0, len(text) - WINDOW + 1, STEP):
-        if _ratio(text[start : start + WINDOW]) > LOOP_RATIO:
+        window = text[start : start + WINDOW]
+        if _ratio(window) > LOOP_RATIO and _repeats_verbatim(window):
             head = text[:start]
             ends = [m.end() for m in re.finditer(r"[.!?…)](\s|$)|\n", head)]
             cut = ends[-1] if ends and ends[-1] > len(head) // 2 else len(head)

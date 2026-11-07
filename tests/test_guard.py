@@ -31,6 +31,31 @@ def test_loop_is_cut_at_a_sentence_end():
     assert trimmed.startswith(PROSE[:300])
 
 
+# Templated lists compress well, but every line differs in the numbers, so they are
+# legitimate replies and must come back unchanged.
+TASK_LIST = "".join(
+    f"- Dan {i}: ob 8:00 zajtrk, ob 12:00 kosilo, ob 19:00 večerja\n"
+    for i in range(1, 15)
+)
+MEMORY_LIST = "Spomini:\n" + "".join(
+    f"#{i}: @user{i} je admin strežnika (od @tim)\n" for i in range(1, 30)
+)
+
+
+def test_templated_task_list_is_kept():
+    assert guard.trim_runaway(TASK_LIST) == TASK_LIST
+
+
+def test_templated_memory_list_is_kept():
+    assert guard.trim_runaway(MEMORY_LIST) == MEMORY_LIST
+
+
+def test_loop_from_the_very_start_is_cut():
+    text = "ja " * 400
+    trimmed = guard.trim_runaway(text)
+    assert trimmed == " …"
+
+
 def test_cap_keeps_short_text():
     assert guard.cap("kratko", 100) == "kratko"
 
