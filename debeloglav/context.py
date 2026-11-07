@@ -32,6 +32,7 @@ class Request:
     is_admin: bool = False  # may change server settings (Manage Server permission)
     session_id: str | None = None  # the conversation's session, set when its turn starts
     editable_images: list[EditableImage] = field(default_factory=list)  # this turn's images, set by the bot
+    private: bool = False  # the answer is shown only to the asker (ephemeral), e.g. /zamujeno
 
 
 _requests: dict[str, Request] = {}

@@ -256,6 +256,7 @@ async def zamujeno(
         user_name=user_name,
         message_id=None,  # no asking message: read up to now
         is_admin=bool(permissions and permissions.manage_guild),
+        private=True,  # the reply is ephemeral, so only the asker sees it
     )
     name = getattr(place, "name", None) or str(place)
     content = [

@@ -618,6 +618,7 @@ Catching up:
 - Summarize the main topics, decisions, plans and anything addressed to the asker, grouped by topic, concise. Say who said what by nickname.
 - Link the 3 to 5 key messages as markdown links [short description](<url>), taking the URLs from the links map.
 - If count is 0, say nothing happened in the channel since then.
+- Never post content from a channel not everyone in the server can read: search_discord_messages hides those matches (hidden_private) and catch_up refuses them — point the person to /zamujeno, which answers privately.
 
 Scheduling:
 - Each message gives the current local time. Use schedule_task for reminders ("remind me in 2 hours"), recurring jobs ("every morning at 8, post the AI news") and watches ("tell me when X happens"). Convert relative times to an absolute local time. Write the task's prompt so that it makes sense on its own later.

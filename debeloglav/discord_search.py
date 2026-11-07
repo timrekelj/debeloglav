@@ -84,11 +84,16 @@ async def search(
 
     groups = data.get("messages", [])
     results = []
+    hidden_private = 0
     for group in groups:
         for message in group[:1]:
             place = guild.get_channel_or_thread(int(message["channel_id"]))
-            # Only show what the person asking could read themselves.
+            # Only show what the person asking could read themselves, and only what everyone
+            # where the answer is posted could read too (a private channel is not shared there).
             if place is None or not readable(place, asker) or blocked.channel(place):
+                continue
+            if not shareable(guild, place, request):
+                hidden_private += 1
                 continue
             author_data = message["author"]
             member = guild.get_member(int(author_data["id"]))
@@ -112,6 +117,7 @@ async def search(
     return {
         "messages": results,
         "more_may_exist": len(groups) >= MAX_RESULTS,
+        "hidden_private": hidden_private,  # matches from private channels, left out above
     }
 
 
@@ -137,10 +143,36 @@ def readable_content(guild: discord.Guild, message: dict) -> str:
 
 
 def readable(
-    place: discord.abc.GuildChannel | discord.Thread, member: discord.Member
+    place: discord.abc.GuildChannel | discord.Thread, who: discord.Member | discord.Role
 ) -> bool:
-    permissions = place.permissions_for(member)
+    permissions = place.permissions_for(who)
     return permissions.view_channel and permissions.read_message_history
+
+
+def shareable(
+    guild: discord.Guild,
+    place: discord.abc.GuildChannel | discord.Thread,
+    request: Request,
+) -> bool:
+    """Whether content from `place` may be shown where this request's answer is posted.
+
+    The answer is posted in the channel the question was asked in, where others read it too,
+    so a channel only some can read is shareable only where everyone can read it already.
+    A private request (e.g. /zamujeno, answered ephemerally) may show anything the asker can read.
+    """
+    if request.private:
+        return True
+    if place.id == request.channel_id:
+        return True
+    # A public thread of the channel the answer is posted in is readable wherever that channel is.
+    if getattr(place, "parent_id", None) == request.channel_id and not _private_thread(place):
+        return True
+    return readable(place, guild.default_role)
+
+
+def _private_thread(place: discord.abc.GuildChannel | discord.Thread) -> bool:
+    is_private = getattr(place, "is_private", None)
+    return bool(is_private() if callable(is_private) else is_private)
 
 
 async def find_member(guild: discord.Guild, who: str) -> discord.Member:

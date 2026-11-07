@@ -171,6 +171,7 @@ async def test_the_normal_path_defers_runs_one_turn_and_replies_ephemerally():
     assert request.user_name == "Timmy (@tim)"
     assert request.message_id is None  # read up to now
     assert not request.is_admin
+    assert request.private is True  # the ephemeral reply is only shown to the asker
 
     ((part,)) = turn["content"]
     assert part["type"] == "text"
@@ -192,6 +193,16 @@ async def test_an_admin_asker_is_marked_as_admin():
     it = interaction(client=client, asker=user(manage_guild=True))
     await commands.zamujeno.callback(it)
     assert client.turns[0]["request"].is_admin is True
+    assert client.turns[0]["request"].private is True
+
+
+async def test_the_request_is_private_for_every_asker():
+    # /zamujeno replies ephemerally, so its Request is always private, admin or not
+    for asker in (user(), user(manage_guild=True)):
+        client = FakeClient(state=completed("ok"))
+        it = interaction(client=client, asker=asker)
+        await commands.zamujeno.callback(it)
+        assert client.turns[0]["request"].private is True
 
 
 async def test_the_named_channel_is_summarized_instead():
