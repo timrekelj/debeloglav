@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
 
 # ffmpeg and ffprobe for videos, tzdata for TIMEZONE
 RUN apt-get update \
