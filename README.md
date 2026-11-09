@@ -73,6 +73,14 @@ Everyone, not just admins, also has `/zamujeno [kanal]`: an ephemeral (private) 
 
 Per-server blocked channels are stored in SQLite (the `blocked_channels` table), so they survive restarts. Code: `debeloglav/commands.py`.
 
+### Admin dashboard
+
+The bot also serves a small password-protected **admin dashboard** (plain HTML, no JavaScript). Set `DASHBOARD_PASSWORD` in `.env` to enable it; it listens on `DASHBOARD_HOST` (default `127.0.0.1`) and `DASHBOARD_PORT` (default `8080`) and uses HTTP Basic auth with any username and that password. With Docker Compose it is published on the host's loopback only, so open <http://localhost:8080>. Over SSH, forward it first: `ssh -L 8080:localhost:8080 host`, then open <http://localhost:8080> locally.
+
+Failed logins are rate-limited: after 5 wrong passwords from one client IP within 15 minutes that IP is locked out for 15 minutes (HTTP 429 with `Retry-After` — even the correct password is refused during the lockout), and more than 50 failures from all IPs together trigger a global 15-minute lockout that only the correct password gets through. Behind a reverse proxy every request arrives from the proxy's own address, so you must set `DASHBOARD_TRUSTED_PROXIES` to the proxy's IP as the dashboard sees it (with Docker Compose that is the Docker bridge gateway, e.g. `172.17.0.1`); without it the `X-Forwarded-For` header is ignored, because anyone can spoof it.
+
+It shows what the bot is doing — recent requests with their full prompts and replies, the prompts it actually gets, style-learning runs and guides, memories, blocked channels and active tasks, and the last errors — and it changes the settings: the model, the reasoning effort and the extra instructions, plus memories, blocked channels, style learning and task cancellation, the same as the `/debeloglav` commands. Code: `debeloglav/dashboard.py`.
+
 ## How it works
 
 - `debeloglav/agent.py`: the agent. `agents.Agent(model="mistral-large-4", tools=[web_search, ...])`. The `web_search` tool calls Mistral's hosted `web_search` through the Conversations API (the pattern the Agents SDK docs recommend) and returns a summary with source URLs. The agent answers in plain text; the sources its searches found are recorded by the tool and listed under the reply.
@@ -129,6 +137,10 @@ Memories, tasks, the style guide and the conversations' sessions live in `data/`
 | `DB_PATH`          | `data/debeloglav.db` | SQLite file for memories and tasks                      |
 | `MAX_RESEARCH_JOBS` | `3`              | How many research jobs can run at once                  |
 | `BLOCKED_CHANNELS` | –                 | Comma-separated channel or category ids the bot never reads (a global list): it ignores messages there, and leaves them out of search and style learning. Admins can also block channels per server with `/debeloglav blokiraj` (stored in the database) |
+| `DASHBOARD_PASSWORD` | –               | Password for the admin web dashboard the bot serves (empty = disabled). See [Admin dashboard](#admin-dashboard) |
+| `DASHBOARD_HOST`   | `127.0.0.1`       | Address the admin dashboard binds to (Compose sets `0.0.0.0` and publishes `127.0.0.1:8080:8080`) |
+| `DASHBOARD_PORT`   | `8080`            | Port the admin dashboard listens on |
+| `DASHBOARD_TRUSTED_PROXIES` | – (trust none) | Comma-separated IPs of the reverse proxy in front of the dashboard (with Docker Compose: the Docker bridge gateway, e.g. `172.17.0.1`, as the container sees it). Only from these is `X-Forwarded-For` trusted, so the failed-login lockout sees the real client IP; empty = the header is ignored as spoofable |
 
 Conversations are saved in `data/` (the message-to-session map in SQLite, the sessions as journals in `data/sessions/`), so a restart continues them. Running research still lives in the bot's memory, so a restart ends it. Memories and scheduled tasks are kept too.
 

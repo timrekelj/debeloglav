@@ -61,9 +61,10 @@ async def run_forever(bot: discord.Client) -> None:
             try:
                 await learn(guild, scope, style)
                 failed_at.pop(scope, None)
-            except Exception:
+            except Exception as e:
                 failed_at[scope] = now
                 log.exception("Learning the style of %s failed", guild.name)
+                record_style_run(scope, 0, None, f"{type(e).__name__}: {e}")
         await asyncio.sleep(CHECK_SECONDS)
 
 
@@ -71,11 +72,30 @@ async def learn(guild: discord.Guild, scope: str, style: store.Style) -> None:
     now = datetime.now(UTC)
     since = max(style.learned_at or now - FIRST_WINDOW, now - FIRST_WINDOW)
     transcript, count = await collect(guild, style.channels, since)
+    guide: str | None = None
     if count >= MIN_MESSAGES:
         style.guide = await summarize(style.guide, transcript)
+        guide = style.guide
         log.info("Learned the style of %s from %d messages", guild.name, count)
+    else:
+        log.info(
+            "Skipped learning the style of %s: only %d messages since the last run",
+            guild.name,
+            count,
+        )
     style.learned_at = now
     store.save_style(scope, style)
+    record_style_run(scope, count, guide, None)
+
+
+def record_style_run(
+    scope: str, messages: int, guide: str | None, error: str | None
+) -> None:
+    """Persist a style-learning run; a database error must never stop learning, so it is only logged."""
+    try:
+        store.log_style_run(scope, messages, guide, error)
+    except Exception:
+        log.exception("Could not record the style run of %s", scope)
 
 
 async def collect(

@@ -1,4 +1,4 @@
-"""SQLite storage for what has to survive a restart: memories, scheduled tasks, style guides and conversations."""
+"""SQLite storage for what has to survive a restart: memories, tasks, style guides, conversations and settings."""
 
 import json
 import os
@@ -52,6 +52,34 @@ CREATE TABLE IF NOT EXISTS conversations (
     last_used TEXT NOT NULL  -- wall-clock UTC ISO time of the session's last use
 );
 CREATE INDEX IF NOT EXISTS conversations_session ON conversations (session_id);
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,  -- 'reply' | 'research' | 'task'
+    scope TEXT NOT NULL,
+    channel_id INTEGER,
+    user_name TEXT,
+    question TEXT,
+    prompt TEXT,  -- the text the model received for the turn; NULL when it never started
+    reply TEXT,
+    ok INTEGER NOT NULL,
+    error TEXT,
+    duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS activity_at ON activity (at);
+CREATE TABLE IF NOT EXISTS style_runs (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,
+    at TEXT NOT NULL,
+    messages INTEGER NOT NULL,
+    guide TEXT,  -- NULL when the run was skipped or failed
+    error TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -84,6 +112,32 @@ class Task:
     watch: bool
     mention: bool
     last_report: str | None
+
+
+@dataclass
+class Activity:
+    id: int
+    at: datetime
+    kind: str  # 'reply' | 'research' | 'task'
+    scope: str
+    channel_id: int | None
+    user_name: str | None
+    question: str | None
+    prompt: str | None
+    reply: str | None
+    ok: bool
+    error: str | None
+    duration_ms: int | None
+
+
+@dataclass
+class StyleRun:
+    id: int
+    scope: str
+    at: datetime
+    messages: int
+    guide: str | None
+    error: str | None
 
 
 def _now() -> str:
@@ -250,11 +304,7 @@ def cancel_task(scope: str, task_id: int) -> bool:
         )
 
 
-def style(scope: str) -> Style:
-    with _connect() as db:
-        row = db.execute("SELECT * FROM styles WHERE scope = ?", (scope,)).fetchone()
-    if row is None:
-        return Style()
+def _style(row: sqlite3.Row) -> Style:
     return Style(
         enabled=bool(row["enabled"]),
         channels=json.loads(row["channels"]) if row["channels"] else None,
@@ -263,6 +313,12 @@ def style(scope: str) -> Style:
         if row["learned_at"]
         else None,
     )
+
+
+def style(scope: str) -> Style:
+    with _connect() as db:
+        row = db.execute("SELECT * FROM styles WHERE scope = ?", (scope,)).fetchone()
+    return _style(row) if row is not None else Style()
 
 
 def save_style(scope: str, style: Style) -> None:
@@ -399,3 +455,216 @@ def session_ids() -> set[str]:
     with _connect() as db:
         rows = db.execute("SELECT DISTINCT session_id FROM conversations").fetchall()
     return {row["session_id"] for row in rows}
+
+
+# --- Activity ------------------------------------------------------------------------------------
+# What the bot did: every answered message, research job and scheduled task run, for the admin
+# dashboard. Only the newest ACTIVITY_LIMIT rows are kept, so the table stays small enough to
+# read whole.
+
+
+ACTIVITY_LIMIT = 2000
+MAX_ACTIVITY_TEXT = 20_000  # stored prompts and replies are capped, so one huge answer cannot bloat the table
+
+
+def log_activity(
+    kind: str,
+    scope: str,
+    channel_id: int | None = None,
+    user_name: str | None = None,
+    question: str | None = None,
+    prompt: str | None = None,
+    reply: str | None = None,
+    ok: bool = True,
+    error: str | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """Record one thing the bot did, and drop the rows older than the newest ACTIVITY_LIMIT."""
+    with _connect() as db:
+        db.execute(
+            """INSERT INTO activity (at, kind, scope, channel_id, user_name, question, prompt, reply, ok, error, duration_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                _now(),
+                kind,
+                scope,
+                channel_id,
+                user_name,
+                question,
+                prompt[:MAX_ACTIVITY_TEXT] if prompt is not None else None,
+                reply[:MAX_ACTIVITY_TEXT] if reply is not None else None,
+                ok,
+                error,
+                duration_ms,
+            ),
+        )
+        db.execute(
+            "DELETE FROM activity WHERE id NOT IN"
+            " (SELECT id FROM activity ORDER BY at DESC, id DESC LIMIT ?)",
+            (ACTIVITY_LIMIT,),
+        )
+
+
+def _activity(row: sqlite3.Row) -> Activity:
+    return Activity(
+        id=row["id"],
+        at=datetime.fromisoformat(row["at"]),
+        kind=row["kind"],
+        scope=row["scope"],
+        channel_id=row["channel_id"],
+        user_name=row["user_name"],
+        question=row["question"],
+        prompt=row["prompt"],
+        reply=row["reply"],
+        ok=bool(row["ok"]),
+        error=row["error"],
+        duration_ms=row["duration_ms"],
+    )
+
+
+def recent_activity(limit: int = 100) -> list[Activity]:
+    """The newest activity rows, newest first."""
+    with _connect() as db:
+        rows = db.execute(
+            "SELECT * FROM activity ORDER BY at DESC, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_activity(row) for row in rows]
+
+
+def activity(activity_id: int) -> Activity | None:
+    """One activity row by its id, for the dashboard's request detail page."""
+    with _connect() as db:
+        row = db.execute(
+            "SELECT * FROM activity WHERE id = ?", (activity_id,)
+        ).fetchone()
+    return _activity(row) if row else None
+
+
+# --- Style runs ----------------------------------------------------------------------------------
+# Every style-learning run, including the skipped and the failed ones, so the guide's history
+# survives even though the guide itself is overwritten each time.
+
+
+def log_style_run(
+    scope: str, messages: int, guide: str | None = None, error: str | None = None
+) -> None:
+    with _connect() as db:
+        db.execute(
+            "INSERT INTO style_runs (scope, at, messages, guide, error) VALUES (?, ?, ?, ?, ?)",
+            (scope, _now(), messages, guide, error),
+        )
+
+
+def _style_run(row: sqlite3.Row) -> StyleRun:
+    return StyleRun(
+        id=row["id"],
+        scope=row["scope"],
+        at=datetime.fromisoformat(row["at"]),
+        messages=row["messages"],
+        guide=row["guide"],
+        error=row["error"],
+    )
+
+
+def style_runs(scope: str | None = None, limit: int = 50) -> list[StyleRun]:
+    """The newest style-learning runs, newest first, of one server or of all of them."""
+    query = "SELECT * FROM style_runs"
+    params: list[object] = []
+    if scope is not None:
+        query += " WHERE scope = ?"
+        params.append(scope)
+    query += " ORDER BY at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with _connect() as db:
+        rows = db.execute(query, params).fetchall()
+    return [_style_run(row) for row in rows]
+
+
+# --- Settings ------------------------------------------------------------------------------------
+# Admin-editable settings (model, reasoning effort, extra instructions), stored so a dashboard can
+# change them at runtime; a missing key falls back to the default read from the environment.
+
+
+def get_setting(key: str) -> str | None:
+    with _connect() as db:
+        row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str | None) -> None:
+    """Save a setting; None deletes the row, so the key falls back to its default."""
+    with _connect() as db:
+        if value is None:
+            db.execute("DELETE FROM settings WHERE key = ?", (key,))
+        else:
+            db.execute(
+                """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT (key) DO UPDATE SET
+                     value = excluded.value, updated_at = excluded.updated_at""",
+                (key, value, _now()),
+            )
+
+
+def all_settings() -> dict[str, str]:
+    with _connect() as db:
+        rows = db.execute("SELECT key, value FROM settings ORDER BY key").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+# --- Everything, for the admin dashboard ---------------------------------------------------------
+
+
+def all_memories() -> list[Memory]:
+    with _connect() as db:
+        rows = db.execute(
+            "SELECT id, text, author, author_id FROM memories ORDER BY id"
+        ).fetchall()
+    return [Memory(**row) for row in rows]
+
+
+def all_memories_by_scope() -> list[tuple[str, Memory]]:
+    """Every memory with its scope, as (scope, memory) pairs, oldest first — for the dashboard."""
+    with _connect() as db:
+        rows = db.execute(
+            "SELECT scope, id, text, author, author_id FROM memories ORDER BY id"
+        ).fetchall()
+    return [
+        (row["scope"], Memory(row["id"], row["text"], row["author"], row["author_id"]))
+        for row in rows
+    ]
+
+
+def all_tasks(active_only: bool = True) -> list[Task]:
+    query = "SELECT * FROM tasks"
+    params: list[object] = []
+    if active_only:
+        query += " WHERE active = 1"
+    query += " ORDER BY next_run"
+    with _connect() as db:
+        rows = db.execute(query, params).fetchall()
+    return [_task(row) for row in rows]
+
+
+def all_styles() -> list[tuple[str, Style]]:
+    """Every server's style settings and learned guide, as (scope, style) pairs."""
+    with _connect() as db:
+        rows = db.execute("SELECT * FROM styles ORDER BY scope").fetchall()
+    return [(row["scope"], _style(row)) for row in rows]
+
+
+def all_blocked_channels() -> list[tuple[int, int]]:
+    """Every (guild_id, channel_id) blocked anywhere."""
+    with _connect() as db:
+        rows = db.execute(
+            "SELECT guild_id, channel_id FROM blocked_channels ORDER BY guild_id, channel_id"
+        ).fetchall()
+    return [(row["guild_id"], row["channel_id"]) for row in rows]
+
+
+def conversation_count() -> int:
+    """How many distinct conversations (sessions) the stored messages point at."""
+    with _connect() as db:
+        row = db.execute(
+            "SELECT COUNT(DISTINCT session_id) AS n FROM conversations"
+        ).fetchone()
+    return int(row["n"])

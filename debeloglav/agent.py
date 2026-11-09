@@ -633,11 +633,76 @@ Scheduled runs:
 - For a watch, if there is nothing new or relevant since your last report, answer exactly {NO_REPLY}. When a watch has done its job and is no longer needed, call cancel_task for it."""
 
 
+# --- Admin settings --------------------------------------------------------------------------------
+# Editable at runtime and stored in SQLite (store.settings), so an admin dashboard can change the
+# model, the reasoning effort and extra instructions without a restart. A missing row falls back to
+# the default read from the environment at import. New turns pick a change up (bot.Debeloglav
+# .apply_settings rebuilds the agent); a session that is already running keeps the settings it
+# started with, because the Agents SDK fixes a session's agent config when the session starts.
+
+REASONING_EFFORTS = ("none", "low", "medium", "high")
+EXTRA_INSTRUCTIONS_HEADING = "Extra instructions from the admins:"
+
+
+def default_settings() -> dict[str, str]:
+    """The editable settings' defaults: the environment at import, extra instructions empty."""
+    return {
+        "reasoning_effort": REASONING_EFFORT or "none",
+        "model": MODEL,
+        "extra_instructions": "",
+    }
+
+
+def current_settings() -> dict[str, str]:
+    """The effective settings: the stored value when one is saved, else the default."""
+    stored = store.all_settings()
+    return {
+        key: stored.get(key) or default for key, default in default_settings().items()
+    }
+
+
+def settings_version() -> str:
+    """A fingerprint of the effective settings, so the bot can tell a change without rebuilding."""
+    return json.dumps(current_settings(), sort_keys=True)
+
+
+def update_setting(key: str, value: str | None) -> dict[str, str]:
+    """Validate and save one setting (None resets it to the default); return the effective settings.
+
+    Raises ValueError on an unknown key or an invalid value, and saves nothing then.
+    """
+    defaults = default_settings()
+    if key not in defaults:
+        raise ValueError(
+            f"Unknown setting {key!r}; the editable settings are: {', '.join(sorted(defaults))}."
+        )
+    if value is not None:
+        value = value.strip()
+        if key == "reasoning_effort" and value not in REASONING_EFFORTS:
+            raise ValueError(
+                f"reasoning_effort must be one of: {', '.join(REASONING_EFFORTS)}; got {value!r}."
+            )
+        if key == "model" and not value:
+            raise ValueError("model must not be empty.")
+    store.set_setting(key, value)
+    return current_settings()
+
+
+def effective_instructions() -> str:
+    """The full system prompt the agent gets: INSTRUCTIONS plus the admins' extra instructions."""
+    extra = current_settings()["extra_instructions"]
+    if not extra:
+        return INSTRUCTIONS
+    return f"{INSTRUCTIONS}\n\n{EXTRA_INSTRUCTIONS_HEADING}\n{extra}"
+
+
 def build_agent() -> agents.Agent:
+    settings = current_settings()
+    reasoning_effort = settings["reasoning_effort"]
     return agents.Agent(
         name="debeloglav",
-        model=MODEL,
-        instructions=INSTRUCTIONS,
+        model=settings["model"],
+        instructions=effective_instructions(),
         tools=[
             web_search,
             generate_image,
@@ -654,9 +719,11 @@ def build_agent() -> agents.Agent:
             configure_style_learning,
         ],
         builtins=QUIET,
-        reasoning_effort=REASONING_EFFORT,
+        reasoning_effort=None if reasoning_effort == "none" else reasoning_effort,
         max_iterations=16,
     )
+
+
 
 
 RESEARCH_INSTRUCTIONS = """You are Debeloglav's research lead. You get one research question and produce a thorough, well-sourced report.

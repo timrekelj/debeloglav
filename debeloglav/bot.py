@@ -7,6 +7,7 @@ import io
 import logging
 import os
 import shutil
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from . import (
     catchup,
     commands,
     context,
+    dashboard,
     discord_search,
     guard,
     media,
@@ -35,6 +37,7 @@ from .agent import (
     build_agent,
     build_research_agent,
     memory_prompt,
+    settings_version,
     style_prompt,
 )
 from .context import TIMEZONE, Request
@@ -104,7 +107,9 @@ class Conversations:
 
     def idle(self) -> list[str]:
         """Forget the sessions nobody used for a while, and return their ids to cancel."""
-        cutoff = (datetime.now(UTC) - timedelta(seconds=SESSION_IDLE_SECONDS)).isoformat()
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=SESSION_IDLE_SECONDS)
+        ).isoformat()
         stale = [
             session_id
             for session_id in store.sessions_idle_since(cutoff)
@@ -124,6 +129,7 @@ class Debeloglav(discord.Client):
         super().__init__(intents=intents, allowed_mentions=ALLOWED_MENTIONS)
         self.tree = discord.app_commands.CommandTree(self)
         self.agent = build_agent()
+        self._settings_version = settings_version()
         self.research_agent = build_research_agent()
         self.conversations = Conversations()
         self.background: set[asyncio.Task[None]] = set()
@@ -136,6 +142,7 @@ class Debeloglav(discord.Client):
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
+        self.spawn(dashboard.serve(self))  # no-op unless DASHBOARD_PASSWORD is set
         commands.setup(self.tree)
         try:
             synced = await self.tree.sync()
@@ -173,6 +180,9 @@ class Debeloglav(discord.Client):
 
         thinking = thinking_emoji(message.guild)
         await react(message, thinking)
+        started = time.monotonic()
+        content: list[dict[str, str]] | None = None
+        error: str | None = None
         try:
             content = await self.build_content(
                 message, request, continuing=session_id is not None
@@ -188,16 +198,46 @@ class Debeloglav(discord.Client):
                     self.agent, None, request, content
                 )
             text, files = await render(parse(state, session_id))
-        except Exception:
+        except Exception as e:
             log.exception("Failed to answer %s", message.jump_url)
+            error = f"{type(e).__name__}: {e}"
             text, files = "Ojoj, nekaj je šlo narobe. Poskusi znova čez trenutek.", []
         finally:
             await unreact(message, thinking, self.user)
 
         text = await mentions.untag(message.guild, text)
         sent = await reply_chunks(message, text, files)
+        record_activity(
+            kind="reply",
+            scope=request.scope,
+            channel_id=request.channel_id,
+            user_name=request.user_name,
+            question=message.clean_content,
+            prompt=prompt_text(content) if content is not None else None,
+            reply=text,
+            ok=error is None,
+            error=error,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
         if session_id:
             self.conversations.link(session_id, message.id, *(m.id for m in sent))
+
+    def apply_settings(self) -> bool:
+        """Rebuild the agent when the admin settings changed, so new turns use them without a restart.
+
+        Returns True when the agent was rebuilt. A conversation whose session is already running
+        keeps the settings that session started with: the Agents SDK fixes a session's agent config
+        at its start (and saves it in the session journal), and a rebuilt agent still resumes those
+        sessions by id — only other tools, hooks, MCP servers, connectors or sandbox raise
+        SessionConfigMismatchError, and build_agent always passes the same ones.
+        """
+        version = settings_version()
+        if version == self._settings_version:
+            return False
+        self.agent = build_agent()
+        self._settings_version = version
+        log.info("Admin settings changed, rebuilt the agent: %s", version)
+        return True
 
     async def run_turn(
         self,
@@ -207,6 +247,8 @@ class Debeloglav(discord.Client):
         content: list[dict[str, str]],
     ) -> tuple[str, agents.TurnState]:
         """Run one turn in the conversation's session, or in a new one, with the request registered for tools."""
+        if self.apply_settings():
+            agent = self.agent  # the caller read self.agent before the settings changed
         session = (
             agent.session(session_id) if session_id else await agent.start_session()
         )
@@ -287,7 +329,10 @@ class Debeloglav(discord.Client):
             request.editable_images = editable[:MAX_IMAGES]
             sections.append(
                 "Images you can edit with edit_image:\n"
-                + "\n".join(f"{i + 1}: {item.label}" for i, item in enumerate(request.editable_images))
+                + "\n".join(
+                    f"{i + 1}: {item.label}"
+                    for i, item in enumerate(request.editable_images)
+                )
             )
 
         return [
@@ -308,20 +353,23 @@ class Debeloglav(discord.Client):
 
     async def research(self, request: Request, question: str) -> None:
         message = session = None
+        started = time.monotonic()
+        prompt: str | None = None
+        error: str | None = None
         try:
             channel = await self.channel(request.channel_id)
             message = channel.get_partial_message(request.message_id)
             await react(message, RESEARCHING)
             session = await self.research_agent.start_session()
+            prompt = f"{now_line()}\n\nResearch question from {request.user_name}:\n{question}"
             async with asyncio.timeout(RESEARCH_TIMEOUT):
-                state = await session.run(
-                    f"{now_line()}\n\nResearch question from {request.user_name}:\n{question}"
-                )
+                state = await session.run(prompt)
             text, files = await render(
                 parse(state), MAX_REPORT_CHARS
             )  # lists its own sources
-        except Exception:
+        except Exception as e:
             log.exception("Research failed: %s", question)
+            error = f"{type(e).__name__}: {e}"
             text, files = (
                 "Raziskava mi ni uspela. Poskusi znova ali vprašanje malo zoži.",
                 [],
@@ -331,15 +379,42 @@ class Debeloglav(discord.Client):
             if session is not None:
                 with suppress(Exception):
                     await session.cancel()
-                delete_journal(session.id)  # a finished research session is not continued
+                delete_journal(
+                    session.id
+                )  # a finished research session is not continued
             if message is not None:
                 await unreact(message, RESEARCHING, self.user)
 
+        duration_ms = int((time.monotonic() - started) * 1000)
         if message is None:
+            record_activity(
+                kind="research",
+                scope=request.scope,
+                channel_id=request.channel_id,
+                user_name=request.user_name,
+                question=question,
+                prompt=prompt,
+                reply=None,
+                ok=error is None,
+                error=error,
+                duration_ms=duration_ms,
+            )
             return  # the channel is gone or unreachable: nowhere to post the report
 
         text = await mentions.untag(getattr(message, "guild", None), text)
         sent = await reply_chunks(message, text, files)
+        record_activity(
+            kind="research",
+            scope=request.scope,
+            channel_id=request.channel_id,
+            user_name=request.user_name,
+            question=question,
+            prompt=prompt,
+            reply=text,
+            ok=error is None,
+            error=error,
+            duration_ms=duration_ms,
+        )
         # Replies to the report continue the conversation that asked for it.
         if request.session_id:
             self.conversations.link(request.session_id, *(m.id for m in sent))
@@ -347,6 +422,39 @@ class Debeloglav(discord.Client):
     # --- Scheduled tasks -----------------------------------------------------------------------
 
     async def run_task(self, task: store.Task) -> None:
+        """Run a scheduled task and record the run; a failure is recorded, then raised as before."""
+        started = time.monotonic()
+        try:
+            prompt, reply = await self.run_scheduled_task(task)
+        except Exception as e:
+            record_activity(
+                kind="task",
+                scope=task.scope,
+                channel_id=task.channel_id,
+                user_name=task.user_name,
+                question=task.prompt,
+                prompt=None,
+                reply=None,
+                ok=False,
+                error=f"{type(e).__name__}: {e}",
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
+        record_activity(
+            kind="task",
+            scope=task.scope,
+            channel_id=task.channel_id,
+            user_name=task.user_name,
+            question=task.prompt,
+            prompt=prompt,
+            reply=reply,
+            ok=True,
+            error=None,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    async def run_scheduled_task(self, task: store.Task) -> tuple[str, str]:
+        """Run the task and post its answer; returns the prompt the model got and the text posted."""
         channel = await self.channel(task.channel_id)
         request = Request(
             scope=task.scope,
@@ -368,16 +476,13 @@ class Debeloglav(discord.Client):
             )
         prompt.append(f"Task: {task.prompt}")
 
-        session_id, state = await self.run_turn(
-            self.agent,
-            None,
-            request,
-            [{"type": "text", "text": "\n\n".join(filter(None, prompt))}],
-        )
+        content = [{"type": "text", "text": "\n\n".join(filter(None, prompt))}]
+        session_id, state = await self.run_turn(self.agent, None, request, content)
+        sent_prompt = prompt_text(content)
         reply = parse(state, session_id)
         if reply is not None and reply.text.startswith(NO_REPLY):
             await self.end_session(session_id)
-            return
+            return sent_prompt, NO_REPLY
         text, files = await render(reply)
         if task.watch and reply is not None:
             store.set_last_report(task.id, reply.text)
@@ -394,6 +499,7 @@ class Debeloglav(discord.Client):
         )
         # People can reply to a scheduled post to follow up on it.
         self.conversations.link(session_id, *(m.id for m in sent))
+        return sent_prompt, text
 
     async def prune_sessions(self) -> None:
         while True:
@@ -509,13 +615,19 @@ async def read_attachment(
                 f"[{who} sent the image {attachment.filename}, but it could not be opened]"
             )
             return
-        images.append({
-            "type": "image",
-            "uri": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
-            "mediaType": "image/jpeg",
-        })
+        images.append(
+            {
+                "type": "image",
+                "uri": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+                "mediaType": "image/jpeg",
+            }
+        )
         if editable is not None:
-            editable.append(context.EditableImage(data=jpeg, label=f"{attachment.filename} from {who}"))
+            editable.append(
+                context.EditableImage(
+                    data=jpeg, label=f"{attachment.filename} from {who}"
+                )
+            )
         return
     document = media.is_document(attachment.filename, attachment.content_type)
     if (
@@ -648,7 +760,9 @@ async def render(
     for i, image in enumerate(reply.found.images):
         # Generated images are JPEG; anything else is kept as PNG.
         suffix = ".jpg" if image.data[:2] == b"\xff\xd8" else ".png"
-        files.append(discord.File(io.BytesIO(image.data), filename=f"debeloglav_{i + 1}{suffix}"))
+        files.append(
+            discord.File(io.BytesIO(image.data), filename=f"debeloglav_{i + 1}{suffix}")
+        )
 
     text = guard.cap(guard.trim_runaway(reply.text), max_chars)
     if not text and not files:
@@ -702,6 +816,48 @@ def split(text: str) -> list[str]:
     if text:
         chunks.append(text)
     return chunks
+
+
+def prompt_text(content: list[dict[str, str]] | str) -> str:
+    """The text the model received for a turn, with a note of how many images came with it."""
+    if isinstance(content, str):
+        return content
+    text = "\n\n".join(part["text"] for part in content if part.get("type") == "text")
+    images = sum(1 for part in content if part.get("type") == "image")
+    if images:
+        text += f"\n\n[+{images} images]"
+    return text
+
+
+def record_activity(
+    *,
+    kind: str,
+    scope: str,
+    channel_id: int | None = None,
+    user_name: str | None = None,
+    question: str | None = None,
+    prompt: str | None = None,
+    reply: str | None = None,
+    ok: bool = True,
+    error: str | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """Record what the bot just did. A database error must never break answering, so it is only logged."""
+    try:
+        store.log_activity(
+            kind=kind,
+            scope=scope,
+            channel_id=channel_id,
+            user_name=user_name,
+            question=question,
+            prompt=prompt,
+            reply=reply,
+            ok=ok,
+            error=error,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        log.exception("Could not record the activity")
 
 
 async def amain() -> None:

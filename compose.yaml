@@ -4,6 +4,10 @@ services:
     env_file: .env
     environment:
       DB_PATH: /app/data/debeloglav.db
+      # The admin dashboard is published on the host's loopback only (set DASHBOARD_PASSWORD in .env)
+      DASHBOARD_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./data:/app/data  # memories, tasks and the style guide survive rebuilds
     restart: unless-stopped
