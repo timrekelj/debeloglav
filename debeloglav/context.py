@@ -37,6 +37,7 @@ class Request:
     session_id: str | None = None  # the conversation's session, set when its turn starts
     editable_images: list[EditableImage] = field(default_factory=list)  # this turn's images, set by the bot
     private: bool = False  # the answer is shown only to the asker (ephemeral), e.g. /zamujeno
+    reply_channel_id: int | None = None  # the thread the bot opened for the answer, if any
 
 
 _requests: dict[str, Request] = {}

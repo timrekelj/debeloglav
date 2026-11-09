@@ -54,33 +54,31 @@ def test_without_overrides_the_settings_are_the_defaults():
     assert settings.get("extra_instructions") == ""
 
 
-def test_defaults_read_the_environment(monkeypatch):
-    for key in ("MISTRAL_MODEL", "REASONING_EFFORT", "VIDEO_FRAMES", "TIMEZONE"):
-        monkeypatch.delenv(key, raising=False)
-    assert settings.get("model") == "mistral-large-4"  # the built-in defaults
-    assert settings.get("reasoning_effort") == "low"
+def test_the_environment_is_never_read(monkeypatch):
     monkeypatch.setenv("MISTRAL_MODEL", "env-model")
-    monkeypatch.setenv("REASONING_EFFORT", "high")
-    monkeypatch.setenv("VIDEO_FRAMES", "9")
-    monkeypatch.setenv("TIMEZONE", "Europe/Berlin")
-    assert settings.get("model") == "env-model"
-    assert settings.get("reasoning_effort") == "high"
-    assert settings.get_int("video_frames") == 9
-    assert context.timezone().key == "Europe/Berlin"
-    monkeypatch.setenv("REASONING_EFFORT", "")  # set but empty: no reasoning
-    assert settings.get("reasoning_effort") == "none"
-    monkeypatch.setenv("VIDEO_FRAMES", "lots")  # invalid: the built-in default
-    assert settings.get_int("video_frames") == 6
-
-
-def test_a_saved_value_wins_over_the_environment(monkeypatch):
     monkeypatch.setenv("CONTEXT_MESSAGES", "4")
-    assert settings.get_int("context_messages") == 4
+    monkeypatch.setenv("TIMEZONE", "Europe/Berlin")
+    assert settings.get("model") == "mistral-large-4"  # the built-in defaults
+    assert settings.get_int("context_messages") == 10
+    assert context.timezone().key == "Europe/Ljubljana"
+
+
+def test_a_saved_value_wins_until_it_is_reset():
     settings.update("context_messages", "12")
     assert settings.get_int("context_messages") == 12
     assert settings.overrides() == {"context_messages": "12"}
     settings.update("context_messages", None)
-    assert settings.get_int("context_messages") == 4
+    assert settings.get_int("context_messages") == 10
+
+
+def test_thread_settings_take_only_their_choices():
+    assert settings.get("reply_in_threads") == "on"
+    assert settings.get_int("thread_archive_hours") == 24
+    for key, bad in (("reply_in_threads", "yes"), ("thread_archive_hours", "12")):
+        with pytest.raises(ValueError):
+            settings.update(key, bad)
+    settings.update("thread_archive_hours", "168")
+    assert settings.get_int("thread_archive_hours") == 168
 
 
 def test_numbers_and_time_zones_are_validated():

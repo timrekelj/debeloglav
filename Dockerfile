@@ -1,6 +1,6 @@
 FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
 
-# ffmpeg and ffprobe for videos, tzdata for TIMEZONE
+# ffmpeg and ffprobe for videos, tzdata for the time zone setting
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg tzdata \
     && rm -rf /var/lib/apt/lists/*

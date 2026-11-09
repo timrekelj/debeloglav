@@ -326,6 +326,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 .legend b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 .s-react { background: var(--s-react); } .s-unreact { background: var(--s-react); }
+.s-thread { background: var(--s-session); }
 .s-context { background: var(--s-context); } .s-session_start { background: var(--s-session); }
 .s-lock_wait { background: var(--s-wait); } .s-turn { background: var(--s-turn); }
 .s-render { background: var(--s-render); } .s-send { background: var(--s-send); }
@@ -942,6 +943,7 @@ async def serve(bot: object) -> None:
 
 STAGES = [  # the stages a request's trace times, in order, with their labels
     ("react", "React"),
+    ("thread", "Open thread"),
     ("context", "Read context"),
     ("session_start", "Start session"),
     ("lock_wait", "Wait for conversation"),
@@ -1266,7 +1268,8 @@ async def requests_page(request: web.Request) -> web.Response:
     )
     table_rows = [
         f"<tr><td class='num'>{e(fmt_time(a.at))}<span class='sub'>{e(a.kind)}</span></td>"
-        f"<td>{e(channel_name(bot, a.channel_id))}<span class='sub'>{e(scope_name(bot, a.scope))}</span></td>"
+        f"<td>{e(channel_name(bot, a.channel_id))}{' <span class=chip>thread</span>' if a.trace.get('thread_id') else ''}"
+        f"<span class='sub'>{e(scope_name(bot, a.scope))}</span></td>"
         f"<td>{e(a.user_name or '—')}</td><td class='wrap'>{e(snippet(a.question, 90))}</td>"
         f"<td>{tool_chips(a)}</td>"
         f"<td>{result_pill(a)}</td>"
@@ -1331,6 +1334,10 @@ async def request_detail(request: web.Request) -> web.Response:
     if t.get("message_url"):
         details.append(
             ("Message", f"<a href='{e(t['message_url'])}'>Open in Discord</a>")
+        )
+    if t.get("thread_url"):
+        details.append(
+            ("Thread", f"<a href='{e(t['thread_url'])}'>Open the thread</a>")
         )
     if t.get("model"):
         details.append(
@@ -1941,7 +1948,7 @@ async def settings_page(request: web.Request) -> web.Response:
                 f"<span class='pill accent'>changed here</span> "
                 f"<span class='faint'>default <code>{e(defaults[s.key] or '(empty)')}</code></span>"
                 if s.key in overrides
-                else f"<span class='faint'>from {'.env <code>' + e(s.env) + '</code>' if s.env and os.environ.get(s.env) is not None else 'the built-in default'}</span>"
+                else "<span class='faint'>default</span>"
             )
             reset = "<button type='submit' name='reset' value='1' class='ghost'>Reset to default</button>"
             field = setting_field(s, current[s.key])
@@ -1965,9 +1972,8 @@ async def settings_page(request: web.Request) -> web.Response:
         "Settings",
         "".join(parts),
         current="/settings",
-        subtitle="The .env gives the defaults; a value saved here wins until you reset it. "
-        "Changes apply to the next message, no restart needed. Keys, tokens and passwords stay "
-        "in .env.",
+        subtitle="Every setting of the bot lives here. Changes apply to the next message, no "
+        "restart needed. Only the keys, token and dashboard password are in .env.",
     )
 
 

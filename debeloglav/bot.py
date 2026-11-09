@@ -65,6 +65,7 @@ IMAGE_SUFFIXES = (
     ".avif",
 )
 DISCORD_LIMIT = 2000
+THREAD_NAME_CHARS = 90  # Discord allows 100
 
 # The Agents SDK sessions are journaled here, next to the database, so conversations survive a restart
 # (in Docker both land in the mounted data/ volume).
@@ -166,6 +167,10 @@ class Debeloglav(discord.Client):
             return
         parent_id = message.reference.message_id if message.reference else None
         session_id = self.conversations.get(parent_id)
+        if session_id is None and isinstance(message.channel, discord.Thread):
+            # A thread opened on a message has that message's id, which is linked to the
+            # conversation that answered it: a message in the thread continues it.
+            session_id = self.conversations.get(message.channel.id)
         request = Request(
             scope=scope_of(message),
             channel_id=message.channel.id,
@@ -186,6 +191,11 @@ class Debeloglav(discord.Client):
         thinking = thinking_emoji(message.guild)
         with trace.stage("react"):
             await react(message, thinking)
+        with trace.stage("thread"):
+            thread = await self.open_thread(message)
+        if thread is not None:
+            request.reply_channel_id = thread.id
+            trace.info.update(thread_id=thread.id, thread_url=thread.jump_url)
         started = time.monotonic()
         content: list[dict[str, str]] | None = None
         error: str | None = None
@@ -220,7 +230,7 @@ class Debeloglav(discord.Client):
 
         with trace.stage("send"):
             text = await mentions.untag(message.guild, text)
-            sent = await reply_chunks(message, text, files)
+            sent = await reply_chunks(message, text, files, place=thread)
         trace.info.update(
             session_id=session_id,
             reply_messages=len(sent),
@@ -307,6 +317,9 @@ class Debeloglav(discord.Client):
         assert self.user is not None
         if message.guild is None:
             return True  # DMs always get an answer
+        channel = message.channel
+        if isinstance(channel, discord.Thread) and channel.owner_id == self.user.id:
+            return True  # every message in a thread the bot opened is for it
         if self.user in message.mentions:
             return True
         reference = message.reference
@@ -324,6 +337,40 @@ class Debeloglav(discord.Client):
             for role in message.role_mentions
         )
 
+    async def open_thread(self, message: discord.Message) -> discord.Thread | None:
+        """The thread to answer a channel message in: a new one opened on it, or the one it has.
+
+        None means answer inline: threads are off in the settings, the message is in a DM, a
+        thread or another kind of channel, or the bot may not open a thread there.
+        """
+        channel = message.channel
+        if settings.get("reply_in_threads") != "on" or not isinstance(
+            channel, discord.TextChannel
+        ):
+            return None
+        if message.thread is not None:
+            return message.thread
+        permissions = channel.permissions_for(channel.guild.me)
+        if not (
+            permissions.create_public_threads and permissions.send_messages_in_threads
+        ):
+            log.warning(
+                "Can't open a thread in #%s (missing Create Public Threads or Send Messages "
+                "in Threads), answering inline",
+                channel.name,
+            )
+            return None
+        try:
+            return await message.create_thread(
+                name=thread_name(message, channel.guild.me),
+                auto_archive_duration=settings.get_int("thread_archive_hours") * 60,
+            )
+        except discord.HTTPException:
+            log.exception(
+                "Could not open a thread on %s, answering inline", message.jump_url
+            )
+            return None
+
     async def build_content(
         self, message: discord.Message, request: Request, *, continuing: bool
     ) -> list[dict[str, str]]:
@@ -340,6 +387,13 @@ class Debeloglav(discord.Client):
         else:
             chain = await reply_chain(message, depth=REPLY_CHAIN_DEPTH)
             history = await recent_history(message, exclude={m.id for m in chain})
+            starter = await thread_starter(message)
+            if starter is not None and starter.id not in {
+                m.id for m in [*chain, *history]
+            }:
+                sections.append(
+                    "This thread was opened on this message:\n" + describe(starter)
+                )
             if history:
                 sections.append(
                     "Recent messages in the channel (oldest first):\n"
@@ -455,7 +509,9 @@ class Debeloglav(discord.Client):
 
         with trace.stage("send"):
             text = await mentions.untag(getattr(message, "guild", None), text)
-            sent = await reply_chunks(message, text, files)
+            sent = await reply_chunks(
+                message, text, files, place=await self.reply_place(request)
+            )
         record_activity(
             kind="research",
             scope=request.scope,
@@ -600,6 +656,15 @@ class Debeloglav(discord.Client):
         with suppress(Exception):
             await self.agent.session(session_id).cancel()
         delete_journal(session_id)
+
+    async def reply_place(self, request: Request) -> discord.abc.Messageable | None:
+        """The thread opened for the request, to post a late answer in; None replies inline."""
+        if request.reply_channel_id is None:
+            return None
+        try:
+            return await self.channel(request.reply_channel_id)
+        except discord.HTTPException:
+            return None  # the thread is gone: reply to the message instead
 
     async def channel(self, channel_id: int) -> discord.abc.Messageable:
         channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
@@ -844,24 +909,56 @@ async def reply_chunks(
     message: discord.Message | discord.PartialMessage,
     text: str,
     files: list[discord.File],
+    place: discord.abc.Messageable | None = None,
 ) -> list[discord.Message]:
     """Reply with text split to Discord's limit, the files with the last part.
 
-    Each part replies to the previous one.
+    Each part replies to the previous one. With a place (the thread opened on the message), the
+    answer is posted there: its first part starts the thread instead of replying, as a reply
+    can't point to a message in another channel.
     """
     chunks = split(text) or [""]
     sent: list[discord.Message] = []
-    target = message
+    channel = place if place is not None else message.channel
+    target = None if place is not None else message
     for i, chunk in enumerate(chunks):
         last = i == len(chunks) - 1
         # fail_if_not_exists=False: if the message was deleted meanwhile, post the answer anyway.
-        target = await message.channel.send(
+        reference = target.to_reference(fail_if_not_exists=False) if target else None
+        target = await channel.send(
             chunk or None,
             files=files if last else [],
-            reference=target.to_reference(fail_if_not_exists=False),
+            reference=reference,
         )
         sent.append(target)
     return sent
+
+
+def thread_name(message: discord.Message, me: discord.Member) -> str:
+    """A thread's name: the question, without the bot's own tag, cut to THREAD_NAME_CHARS."""
+    text = message.clean_content
+    for name in {me.display_name, me.name}:
+        text = text.replace(f"@{name}", " ")
+    text = " ".join(text.split()).strip(" ,:")
+    if len(text) > THREAD_NAME_CHARS:
+        text = text[: THREAD_NAME_CHARS - 1].rstrip() + "…"
+    return text or "Debeloglav"
+
+
+async def thread_starter(message: discord.Message) -> discord.Message | None:
+    """The message a thread was opened on, which the thread's own history leaves out."""
+    thread = message.channel
+    if not isinstance(thread, discord.Thread):
+        return None
+    if thread.starter_message is not None:
+        return thread.starter_message
+    parent = thread.parent
+    if not isinstance(parent, discord.TextChannel):
+        return None  # a forum post's first message is in the thread itself
+    try:
+        return await parent.fetch_message(thread.id)
+    except discord.HTTPException:
+        return None
 
 
 def split(text: str) -> list[str]:

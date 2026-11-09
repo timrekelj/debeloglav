@@ -1,23 +1,20 @@
-"""Every optional setting of the bot, in one place: its .env variable, its default and its limits.
+"""Every optional setting of the bot, in one place: its default and its limits.
 
-The environment gives each setting its default; the admin dashboard can override it at runtime.
-An override is stored in SQLite (store.settings), and get() reads it on every call, so a change
-takes effect on the next message without a restart. Resetting an override deletes the row, so the
-setting falls back to the .env value again. API keys, tokens and passwords, the database path and
-the dashboard's own address stay in .env only: they are secret, or needed before the database opens.
+The settings are changed only in the admin dashboard, never read from the environment. A changed
+value is stored in SQLite (store.settings), and get() reads it on every call, so a change takes
+effect on the next message without a restart. Resetting it deletes the row, so the setting falls
+back to its built-in default. Only the API keys, the token, the dashboard password and what is
+needed before the database opens (its path, the dashboard's address) come from .env.
 """
 
 import json
-import logging
-import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import store
 
-log = logging.getLogger("debeloglav.settings")
-
 REASONING_EFFORTS = ("none", "low", "medium", "high")
+THREAD_ARCHIVE_HOURS = ("1", "24", "72", "168")  # the only durations Discord allows
 
 
 @dataclass(frozen=True)
@@ -27,14 +24,10 @@ class Setting:
     label: str
     help: str
     default: str
-    env: str | None = (
-        None  # the .env variable that gives the default; None: dashboard only
-    )
     kind: str = "text"  # "text", "int", "choice", "textarea" or "timezone"
     choices: tuple[str, ...] = ()
     minimum: int | None = None
     maximum: int | None = None
-    empty: str | None = None  # the value of an env variable that is set but empty
 
 
 SETTINGS = [
@@ -45,7 +38,6 @@ SETTINGS = [
         "Main model",
         "Answers messages, runs research and learns the style.",
         "mistral-large-4",
-        env="MISTRAL_MODEL",
     ),
     Setting(
         "reasoning_effort",
@@ -54,10 +46,8 @@ SETTINGS = [
         "How long the main model thinks before it answers. Higher is slower. Research always uses "
         "the model's default.",
         "low",
-        env="REASONING_EFFORT",
         kind="choice",
         choices=REASONING_EFFORTS,
-        empty="none",
     ),
     Setting(
         "tool_model",
@@ -65,7 +55,6 @@ SETTINGS = [
         "Tool model",
         "A faster model for the hosted web search and image generation.",
         "mistral-medium-latest",
-        env="TOOL_MODEL",
     ),
     Setting(
         "transcribe_model",
@@ -73,7 +62,6 @@ SETTINGS = [
         "Transcription model",
         "Transcribes voice messages and the sound of videos.",
         "voxtral-mini-transcribe-3",
-        env="TRANSCRIBE_MODEL",
     ),
     Setting(
         "ocr_model",
@@ -81,7 +69,6 @@ SETTINGS = [
         "OCR model",
         "Reads PDF, Word and PowerPoint files.",
         "mistral-ocr-latest",
-        env="OCR_MODEL",
     ),
     # Behaviour
     Setting(
@@ -98,7 +85,6 @@ SETTINGS = [
         "Context messages",
         "How many recent channel messages the bot reads with a new question.",
         "10",
-        env="CONTEXT_MESSAGES",
         kind="int",
         minimum=0,
         maximum=50,
@@ -109,7 +95,6 @@ SETTINGS = [
         "Video frames",
         "How many frames of a video the model sees.",
         "6",
-        env="VIDEO_FRAMES",
         kind="int",
         minimum=1,
         maximum=20,
@@ -120,7 +105,6 @@ SETTINGS = [
         "Thinking emote",
         "The server emote, by name, the bot reacts with while it thinks (🤔 when the server has none).",
         "hmmmm",
-        env="THINKING_EMOTE",
     ),
     Setting(
         "timezone",
@@ -128,7 +112,6 @@ SETTINGS = [
         "Time zone",
         "Local time for reminders, schedules and the dashboard, e.g. Europe/Ljubljana.",
         "Europe/Ljubljana",
-        env="TIMEZONE",
         kind="timezone",
     ),
     Setting(
@@ -137,10 +120,29 @@ SETTINGS = [
         "Conversation timeout (hours)",
         "A reply after this long starts a new conversation instead of continuing the old one.",
         "6",
-        env="SESSION_IDLE_HOURS",
         kind="int",
         minimum=1,
         maximum=168,
+    ),
+    # Threads
+    Setting(
+        "reply_in_threads",
+        "Threads",
+        "Reply in threads",
+        "When tagged in a channel, open a thread on the message and answer there. The bot "
+        "answers every message in its own threads; in other threads only tags and replies.",
+        "on",
+        kind="choice",
+        choices=("on", "off"),
+    ),
+    Setting(
+        "thread_archive_hours",
+        "Threads",
+        "Archive threads after (hours)",
+        "A thread the bot opened is hidden after this long without messages.",
+        "24",
+        kind="choice",
+        choices=THREAD_ARCHIVE_HOURS,
     ),
     # Limits
     Setting(
@@ -149,7 +151,6 @@ SETTINGS = [
         "Research jobs at once",
         "How many background research jobs can run at the same time.",
         "3",
-        env="MAX_RESEARCH_JOBS",
         kind="int",
         minimum=1,
         maximum=10,
@@ -160,7 +161,6 @@ SETTINGS = [
         "Research timeout (minutes)",
         "A research job that runs longer is stopped.",
         "20",
-        env="RESEARCH_TIMEOUT_MINUTES",
         kind="int",
         minimum=1,
         maximum=120,
@@ -171,7 +171,6 @@ SETTINGS = [
         "Memories per server",
         "How many facts the bot remembers per server.",
         "100",
-        env="MAX_MEMORIES",
         kind="int",
         minimum=1,
         maximum=1000,
@@ -182,7 +181,6 @@ SETTINGS = [
         "Tasks per server",
         "How many scheduled tasks a server can have.",
         "25",
-        env="MAX_TASKS",
         kind="int",
         minimum=1,
         maximum=200,
@@ -193,7 +191,6 @@ SETTINGS = [
         "Tasks per person",
         "How many scheduled tasks one person can have.",
         "10",
-        env="MAX_TASKS_PER_PERSON",
         kind="int",
         minimum=1,
         maximum=200,
@@ -205,7 +202,6 @@ SETTINGS = [
         "Learn every (hours)",
         "How often the style guide is refreshed.",
         "24",
-        env="LEARN_EVERY_HOURS",
         kind="int",
         minimum=1,
         maximum=720,
@@ -216,7 +212,6 @@ SETTINGS = [
         "First run reads (days)",
         "How far back a run reads at most.",
         "7",
-        env="STYLE_WINDOW_DAYS",
         kind="int",
         minimum=1,
         maximum=60,
@@ -227,7 +222,6 @@ SETTINGS = [
         "Minimum messages",
         "A run with fewer new messages is skipped.",
         "20",
-        env="STYLE_MIN_MESSAGES",
         kind="int",
         minimum=1,
         maximum=1000,
@@ -272,26 +266,12 @@ def validate(key: str, value: str) -> str:
     return value
 
 
-def env_default(setting: Setting) -> str:
-    """The setting's default: its .env value when that is set and valid, else the built-in one."""
-    raw = os.environ.get(setting.env) if setting.env else None
-    if raw is None:
-        return setting.default
-    if not raw.strip() and setting.empty is not None:
-        return setting.empty
-    try:
-        return validate(setting.key, raw)
-    except ValueError as error:
-        log.warning("Ignoring %s from the environment: %s", setting.env, error)
-        return setting.default
-
-
 def defaults() -> dict[str, str]:
-    return {setting.key: env_default(setting) for setting in SETTINGS}
+    return {setting.key: setting.default for setting in SETTINGS}
 
 
 def overrides() -> dict[str, str]:
-    """The values saved from the dashboard, only for known keys."""
+    """The values changed in the dashboard, only for known keys."""
     return {key: value for key, value in store.all_settings().items() if key in BY_KEY}
 
 
@@ -314,7 +294,7 @@ def get(key: str) -> str:
             return validate(key, saved)
         except ValueError:
             pass
-    return env_default(setting)
+    return setting.default
 
 
 def get_int(key: str) -> int:
