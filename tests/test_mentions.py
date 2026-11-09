@@ -71,3 +71,49 @@ async def test_email_addresses_are_left_alone():
 
 async def test_dms_have_no_guild():
     assert await mentions.untag(None, "<@1> <@&2>") == "nekdo vloga"
+
+
+class FakeEmoji:
+    def __init__(self, name, id, animated=False, available=True):
+        self.name, self.id, self.animated, self.available = (
+            name,
+            id,
+            animated,
+            available,
+        )
+
+    def __str__(self):
+        return f"<{'a' if self.animated else ''}:{self.name}:{self.id}>"
+
+
+def emoji_guild():
+    guild = FakeGuild()
+    guild.emojis = [
+        FakeEmoji("kekw", 11),
+        FakeEmoji("thistbh", 12),
+        FakeEmoji("dance", 13, animated=True),
+        FakeEmoji("gone", 14, available=False),
+    ]
+    return guild
+
+
+async def test_server_emojis_get_their_ids():
+    guild = emoji_guild()
+    text = await mentions.untag(
+        guild, "fak ja <:kekw:> <:thistbh:> :dance: <:kekw:999>"
+    )
+    assert text == "fak ja <:kekw:11> <:thistbh:12> <a:dance:13> <:kekw:11>"
+
+
+async def test_unknown_emojis_and_lookalikes_stay_text():
+    guild = emoji_guild()
+    text = await mentions.untag(guild, "<:nope:> :nope: :gone: <:other:42> ob 12:30:45")
+    assert text == ":nope: :nope: :gone: <:other:42> ob 12:30:45"
+    assert await mentions.untag(None, "<:kekw:> :kekw:") == ":kekw: :kekw:"
+
+
+def test_the_model_is_told_the_usable_emojis():
+    prompt = mentions.emoji_prompt(emoji_guild())
+    assert ":dance:, :kekw:, :thistbh:" in prompt and "gone" not in prompt
+    assert mentions.emoji_prompt(None) == ""
+    assert mentions.emoji_prompt(FakeGuild()) == ""

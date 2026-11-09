@@ -378,6 +378,7 @@ class Debeloglav(discord.Client):
             now_line(),
             memory_prompt(request.scope),
             style_prompt(request.scope),
+            mentions.emoji_prompt(getattr(message, "guild", None)),
         ]
         if continuing:
             # The session already has the conversation; add only what this message replies to.
@@ -584,6 +585,7 @@ class Debeloglav(discord.Client):
             now_line(),
             memory_prompt(task.scope),
             style_prompt(task.scope),
+            mentions.emoji_prompt(getattr(channel, "guild", None)),
         ]
         if task.watch:
             prompt.append(
