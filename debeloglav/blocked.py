@@ -1,20 +1,8 @@
-"""Channels the bot never reads: a global list from the environment, plus per-server ones set by admins."""
-
-import os
-import re
+"""Channels the bot never reads, blocked per server by admins in the dashboard."""
 
 import discord
 
 from . import store
-
-
-def _ids(variable: str) -> frozenset[int]:
-    return frozenset(
-        int(i) for i in re.split(r"[\s,]+", os.environ.get(variable, "")) if i
-    )
-
-
-BLOCKED_CHANNELS = _ids("BLOCKED_CHANNELS")
 
 # Channel and category ids blocked per server in the database, cached so channel() stays cheap
 # and synchronous. Ids are unique across Discord, so one set of ids serves every server.
@@ -54,4 +42,4 @@ def channel(place: discord.abc.Messageable | None) -> bool:
         getattr(parent, "category_id", None),
     }
     _load_db()
-    return not (BLOCKED_CHANNELS | _db_blocked).isdisjoint(ids)
+    return not _db_blocked.isdisjoint(ids)

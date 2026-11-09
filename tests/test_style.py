@@ -3,9 +3,10 @@
 import asyncio
 from contextlib import suppress
 
+import discord
 import pytest
 
-from debeloglav import store, style
+from debeloglav import blocked, store, style
 
 
 class FakeGuild:
@@ -31,8 +32,8 @@ def clean_style_tables():
 
 
 async def test_learn_records_the_summarized_guide(monkeypatch):
-    async def collect(guild, channels, since):
-        return "Tim: zdravo\nLuka: oj", 42
+    async def collect(guild, since):
+        return "Tim: zdravo\nLuka: oj", 42, []
 
     async def summarize(previous, transcript):
         return "## Ton\nLjudje so sproščeni."
@@ -48,16 +49,66 @@ async def test_learn_records_the_summarized_guide(monkeypatch):
 
 
 async def test_learn_records_a_skipped_run(monkeypatch):
-    async def collect(guild, channels, since):
-        return "Malo sporočil.", style.MIN_MESSAGES - 1
+    async def collect(guild, since):
+        return "Malo sporočil.", style.MIN_MESSAGES - 1, ["#tajno: blocked"]
 
     monkeypatch.setattr(style, "collect", collect)
-    await style.learn(FakeGuild(2, "Testni"), "guild:learn2", store.Style())
+    assert not await style.learn(FakeGuild(2, "Testni"), "guild:learn2", store.Style())
     (run,) = store.style_runs("guild:learn2")
     assert run.messages == style.MIN_MESSAGES - 1
     assert run.guide is None  # skipped: too few messages
     assert run.error is None
-    assert store.style("guild:learn2").learned_at is not None
+    assert run.skipped == ["#tajno: blocked"]
+    # a skip does not move learned_at, so the next run still reads the whole window
+    assert store.style("guild:learn2").learned_at is None
+
+
+class FakeChannel:
+    def __init__(self, id, name, messages=(), view=True, error=None):
+        self.id = id
+        self.name = name
+        self.category_id = None
+        self.messages = list(messages)
+        self.view = view
+        self.error = error
+
+    def permissions_for(self, who):
+        return discord.Permissions(view_channel=self.view, read_message_history=self.view)
+
+    async def history(self, **kwargs):
+        if self.error:
+            raise self.error
+        for message in self.messages:
+            yield message
+
+
+def message(name, text, bot=False):
+    author = type("Author", (), {"bot": bot, "name": name, "display_name": name})()
+    return type("Message", (), {"author": author, "clean_content": text})()
+
+
+async def test_collect_reads_every_channel_but_blocked_and_unreadable(monkeypatch):
+    monkeypatch.setattr(blocked, "_db_blocked", {12})
+    monkeypatch.setattr(blocked, "_db_loaded", True)
+    response = type("Response", (), {"status": 403, "reason": "Forbidden"})()
+    guild = FakeGuild(5, "Testni")
+    guild.me = object()
+    guild.text_channels = [
+        FakeChannel(10, "general", [message("tim", "zdravo"), message("bot", "beep", bot=True)]),
+        FakeChannel(11, "private", [message("luka", "oj")]),  # not public: still read
+        FakeChannel(12, "tajno", [message("ana", "skrivnost")]),
+        FakeChannel(13, "skrit", [message("ana", "nevidno")], view=False),
+        FakeChannel(14, "pokvarjen", error=discord.Forbidden(response, "Missing Access")),
+    ]
+    transcript, count, skipped = await style.collect(guild, since=None)
+    assert count == 2
+    assert "#general" in transcript and "#private" in transcript
+    assert "skrivnost" not in transcript and "nevidno" not in transcript
+    assert skipped == [
+        "#tajno: blocked",
+        "#skrit: the bot can't read its history",
+        "#pokvarjen: 403 Missing Access",
+    ]
 
 
 async def test_run_forever_records_a_failed_run(monkeypatch):

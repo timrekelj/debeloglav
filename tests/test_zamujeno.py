@@ -132,7 +132,8 @@ def completed(text):
 
 
 async def test_a_blocked_channel_is_refused(monkeypatch):
-    monkeypatch.setattr(blocked, "BLOCKED_CHANNELS", frozenset({10}))
+    monkeypatch.setattr(blocked, "_db_blocked", {10})
+    monkeypatch.setattr(blocked, "_db_loaded", True)
     client = FakeClient(state=completed("ne bi smelo"))
     it = interaction(client=client, place=channel(10, "general"))
     await commands.zamujeno.callback(it)

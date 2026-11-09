@@ -38,7 +38,9 @@ log = logging.getLogger("debeloglav")
 
 
 @agents.tool(model_access="direct")
-async def web_search(ctx: agents.ToolCallbackContext, /, query: str) -> dict[str, object]:
+async def web_search(
+    ctx: agents.ToolCallbackContext, /, query: str
+) -> dict[str, object]:
     """Search the web for current or factual information. Returns a summary of what was found and its sources."""
     response = await client.beta.conversations.start_async(
         model=TOOL_MODEL,
@@ -90,7 +92,9 @@ async def generate_image(ctx: agents.ToolCallbackContext, /, prompt: str) -> str
 
 
 @agents.tool(model_access="direct")
-async def edit_image(ctx: agents.ToolCallbackContext, /, instruction: str, image: int = 1) -> str:
+async def edit_image(
+    ctx: agents.ToolCallbackContext, /, instruction: str, image: int = 1
+) -> str:
     """Edit one of the images in this message: change, add or remove something in it.
     The edited image is attached to your reply automatically.
 
@@ -140,7 +144,9 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
         log.exception("Could not upload the image for editing")
         return None
     try:
-        url = (await client.files.get_signed_url_async(file_id=uploaded.id, expiry=24)).url
+        url = (
+            await client.files.get_signed_url_async(file_id=uploaded.id, expiry=24)
+        ).url
         response = await client.beta.conversations.start_async(
             model=TOOL_MODEL,
             instructions=EDIT_INSTRUCTIONS,
@@ -148,7 +154,10 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": f"Edit the image at this exact URL: {url}\n{instruction}"},
+                        {
+                            "type": "text",
+                            "text": f"Edit the image at this exact URL: {url}\n{instruction}",
+                        },
                         {"type": "image_url", "image_url": url},
                     ],
                 }
@@ -159,7 +168,11 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
         used = None
         for entry in _tool_execution_entries(response, "image_generation"):
             try:
-                arguments = json.loads(entry.arguments) if isinstance(entry.arguments, str) else entry.arguments
+                arguments = (
+                    json.loads(entry.arguments)
+                    if isinstance(entry.arguments, str)
+                    else entry.arguments
+                )
             except ValueError:
                 arguments = None
             if isinstance(arguments, dict):
@@ -196,7 +209,10 @@ async def _describe_image(data: bytes) -> str:
                     },
                     {
                         "type": "image_url",
-                        "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(data).decode()},
+                        "image_url": {
+                            "url": "data:image/jpeg;base64,"
+                            + base64.b64encode(data).decode()
+                        },
                     },
                 ],
             }
@@ -207,7 +223,9 @@ async def _describe_image(data: bytes) -> str:
     return content if isinstance(content, str) else ""
 
 
-def _tool_execution_entries(response: object, name: str) -> list[api_models.ToolExecutionEntry]:
+def _tool_execution_entries(
+    response: object, name: str
+) -> list[api_models.ToolExecutionEntry]:
     return [
         entry
         for entry in response.outputs  # type: ignore[attr-defined]
@@ -267,17 +285,25 @@ async def _download_images(urls: list[str]) -> list[bytes]:
     async with aiohttp.ClientSession() as session:
         for url in urls:
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as response:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=120)
+                ) as response:
                     if response.status == 200:
                         images.append(await response.read())
                     else:
-                        log.warning("Image download from %s returned HTTP %s", url, response.status)
+                        log.warning(
+                            "Image download from %s returned HTTP %s",
+                            url,
+                            response.status,
+                        )
             except Exception:
                 log.exception("Could not download the image from %s", url)
     return images
 
 
-async def _generate_images(prompt: str, instructions: str = GENERATE_INSTRUCTIONS) -> list[bytes]:
+async def _generate_images(
+    prompt: str, instructions: str = GENERATE_INSTRUCTIONS
+) -> list[bytes]:
     """Run the hosted image_generation tool and download what it made."""
     response = await client.beta.conversations.start_async(
         model=TOOL_MODEL,
@@ -311,7 +337,9 @@ def remember(ctx: agents.ToolCallbackContext, /, fact: str) -> str:
         raise agents.ToolError(
             f"Memory is full ({MAX_MEMORIES} facts). Ask which facts to forget first."
         )
-    memory_id = store.add_memory(request.scope, fact.strip(), request.user_name, request.user_id)
+    memory_id = store.add_memory(
+        request.scope, fact.strip(), request.user_name, request.user_id
+    )
     return f"Saved as memory #{memory_id}."
 
 
@@ -323,7 +351,9 @@ def forget_memory(ctx: agents.ToolCallbackContext, /, memory_id: int) -> str:
     if saved is None:
         raise agents.ToolError(f"There is no memory #{memory_id}.")
     if not (request.is_admin or saved.author_id == request.user_id):
-        raise agents.ToolError(f"Only {saved.author} or a server admin can delete memory #{memory_id}.")
+        raise agents.ToolError(
+            f"Only {saved.author} or a server admin can delete memory #{memory_id}."
+        )
     store.delete_memory(request.scope, memory_id)
     return f"Memory #{memory_id} deleted."
 
@@ -383,7 +413,9 @@ async def search_discord_messages(
 
 
 @agents.tool(model_access="direct")
-async def catch_up(ctx: agents.ToolCallbackContext, /, channel: str | None = None) -> dict[str, object]:
+async def catch_up(
+    ctx: agents.ToolCallbackContext, /, channel: str | None = None
+) -> dict[str, object]:
     """Read what was written in a channel since the asker last wrote there, up to 300 messages, oldest first.
     Use it to summarize what someone missed. Returns the transcript with short message ids (m1, m2, ...)
     and a links map from each id to that message's URL.
@@ -412,42 +444,11 @@ def show_style_guide(ctx: agents.ToolCallbackContext, /) -> dict[str, object]:
     style = store.style(context.current(ctx).scope)
     return {
         "enabled": style.enabled,
-        "channels": style.channels or "all channels",
-        "learned_at": f"{style.learned_at.astimezone(TIMEZONE):%Y-%m-%d %H:%M}" if style.learned_at else None,
+        "learned_at": f"{style.learned_at.astimezone(TIMEZONE):%Y-%m-%d %H:%M}"
+        if style.learned_at
+        else None,
         "guide": style.guide or "(nothing learned yet)",
     }
-
-
-@agents.tool(model_access="direct")
-def configure_style_learning(
-    ctx: agents.ToolCallbackContext,
-    /,
-    enabled: bool | None = None,
-    channels: list[str] | None = None,
-    all_channels: bool = False,
-    relearn: bool = False,
-) -> str:
-    """Change how you learn this server's way of talking. Only server admins may do this.
-
-    enabled: turn daily learning on or off. Turning it off also deletes the learned guide.
-    channels: learn only from these channel names (without #). Private channels are used too when named here.
-    all_channels: learn from every channel everyone can read again (the default).
-    relearn: forget the guide and learn it again from the last week, within 15 minutes.
-    """
-    request = context.current(ctx)
-    if not request.scope.startswith("guild:"):
-        raise agents.ToolError("Style learning only works in a server.")
-    if not request.is_admin:
-        raise agents.ToolError("Only server admins (Manage Server permission) can change this.")
-    saved = store.configure_style(
-        request.scope,
-        enabled=enabled,
-        channels=channels,
-        all_channels=all_channels,
-        relearn=relearn,
-    )
-    where = ", ".join(f"#{name}" for name in saved.channels) if saved.channels else "all channels"
-    return f"Style learning is {'on' if saved.enabled else 'off'}, from {where}."
 
 
 # --- Scheduling --------------------------------------------------------------------------------
@@ -554,7 +555,9 @@ def cancel_task(ctx: agents.ToolCallbackContext, /, task_id: int) -> str:
     if task is None:
         raise agents.ToolError(f"There is no active task #{task_id}.")
     if not (request.is_admin or task.user_id == request.user_id):
-        raise agents.ToolError(f"Only {task.user_name} or a server admin can cancel task #{task_id}.")
+        raise agents.ToolError(
+            f"Only {task.user_name} or a server admin can cancel task #{task_id}."
+        )
     store.cancel_task(request.scope, task_id)
     return f"Task #{task_id} cancelled."
 
@@ -598,7 +601,7 @@ Language and tone:
 - Always write in Slovenian, even when the question or the sources are in another language. Switch only when someone explicitly asks for another language.
 - Talk like a friend in the chat, not like an official or a customer-support bot: casual spoken Slovenian (pogovorni jezik), always tikaj (never vikaj), short sentences, no stiff phrases like "Spoštovani", "Z veseljem vam pomagam" or "Upam, da sem vam pomagal".
 - Mirror how people in this server talk: pick up their words, slang, abbreviations and humour from your style guide (when a message includes one), the recent messages and what you remember. Don't overdo it, and don't make up slang that nobody uses.
-- You learn the style guide every day from the server's messages. When asked what you learned, call show_style_guide. Admins can turn learning off, limit it to channels or make you relearn with configure_style_learning.
+- You learn the style guide every day from the server's messages. When asked what you learned, call show_style_guide. Admins change learning in the admin dashboard, not through you.
 - Keep facts, numbers and names exact; casual tone never means sloppy content.
 - Use emoji sparingly: at most two or three per message, even if the server uses more. Say what you have to say once, with at most one short sign-off, then stop. Never pad, repeat yourself or keep saying goodbye.
 
@@ -716,14 +719,11 @@ def build_agent() -> agents.Agent:
             search_discord_messages,
             catch_up,
             show_style_guide,
-            configure_style_learning,
         ],
         builtins=QUIET,
         reasoning_effort=None if reasoning_effort == "none" else reasoning_effort,
         max_iterations=16,
     )
-
-
 
 
 RESEARCH_INSTRUCTIONS = """You are Debeloglav's research lead. You get one research question and produce a thorough, well-sourced report.

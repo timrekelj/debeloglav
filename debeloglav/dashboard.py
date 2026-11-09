@@ -15,7 +15,6 @@ import html
 import logging
 import math
 import os
-import re
 import secrets
 import time
 from collections.abc import Callable
@@ -819,7 +818,17 @@ def run_status(run: store.StyleRun) -> str:
         return f"error: {run.error}"
     if run.guide:
         return "learned"
-    return "skipped (too few messages)"
+    return f"skipped (needs at least {style.MIN_MESSAGES} messages)"
+
+
+def skipped_channels(run: store.StyleRun) -> str:
+    """The channels a style run left out and why, folded away when there are any."""
+    if not run.skipped:
+        return "<span class='note'>none</span>"
+    return (
+        f"<details><summary>{len(run.skipped)}</summary>"
+        f"<pre>{e(chr(10).join(run.skipped))}</pre></details>"
+    )
 
 
 def status_pill(text: str) -> str:
@@ -975,11 +984,6 @@ async def learning_page(request: web.Request) -> web.Response:
     for guild in getattr(bot, "guilds", []):
         scope = f"guild:{guild.id}"
         st = store.style(scope)
-        channels = (
-            ", ".join(f"#{c}" for c in st.channels)
-            if st.channels
-            else "all public channels"
-        )
         if st.learned_at and st.enabled:
             due = fmt_time(st.learned_at + style.LEARN_EVERY)
         elif st.enabled:
@@ -999,19 +1003,17 @@ async def learning_page(request: web.Request) -> web.Response:
         parts.append(
             f"<section><h2>{e(guild.name)} ({e(scope)})</h2><table class='kv'>"
             f"<tr><th>Enabled</th><td>{enabled_pill}</td></tr>"
-            f"<tr><th>Channels</th><td>{e(channels)}</td></tr>"
+            f"<tr><th>Channels</th><td>every channel the bot can read, except "
+            f"<a href='/channels'>blocked ones</a></td></tr>"
             f"<tr><th>Learned at</th><td>{e(fmt_time(st.learned_at))}</td></tr>"
             f"<tr><th>Next due</th><td>{e(due)}</td></tr></table>{guide}"
             f"<form method='post' action='/learning/action'>"
             f"<input type='hidden' name='scope' value='{e(scope)}'>"
             f"<input type='hidden' name='next' value='/learning'>"
-            f"<label>Channel names to learn from (comma or space separated, empty = unchanged)</label>"
-            f"<input type='text' name='channels' value='{e(', '.join(st.channels or []))}'>"
             f"<div class='btn-row'>"
             f"<button type='submit' name='action' value='enable'>Enable</button> "
             f"<button type='submit' name='action' value='disable' class='danger'>Disable</button> "
-            f"<button type='submit' name='action' value='relearn'>Relearn now</button> "
-            f"<button type='submit' name='action' value='all'>Learn from all public channels</button>"
+            f"<button type='submit' name='action' value='relearn'>Relearn now</button>"
             f"</div></form></section>"
         )
 
@@ -1019,12 +1021,15 @@ async def learning_page(request: web.Request) -> web.Response:
     run_rows = "".join(
         f"<tr><td>{e(fmt_time(r.at))}</td><td>{e(scope_label(bot, r.scope))}</td>"
         f"<td>{r.messages}</td><td>{status_pill(run_status(r))}</td>"
+        f"<td>{skipped_channels(r)}</td>"
         f"<td><details><summary>guide</summary><pre>{e(r.guide or '(none)')}</pre></details></td></tr>"
         for r in runs
     )
     history = (
         "<div class='table-wrap'><table><tr><th>Time</th><th>Guild</th><th>Messages</th>"
-        "<th>Result</th><th>Guide</th></tr>" + run_rows + "</table></div>"
+        "<th>Result</th><th>Skipped channels</th><th>Guide</th></tr>"
+        + run_rows
+        + "</table></div>"
         if run_rows
         else "<p class='note'>No style runs yet.</p>"
     )
@@ -1036,17 +1041,13 @@ async def learning_action(request: web.Request) -> web.Response:
     data = await request.post()
     scope = data.get("scope", "")
     action = data.get("action", "")
-    names = [n for n in re.split(r"[,\s]+", data.get("channels", "")) if n] or None
-    # The same semantics as the /debeloglav ucenje slash command.
     if scope.startswith("guild:"):
         if action == "enable":
-            store.configure_style(scope, enabled=True, channels=names)
+            store.configure_style(scope, enabled=True)
         elif action == "disable":
             store.configure_style(scope, enabled=False)
         elif action == "relearn":
-            store.configure_style(scope, relearn=True, channels=names)
-        elif action == "all":
-            store.configure_style(scope, enabled=True, all_channels=True)
+            store.configure_style(scope, relearn=True)
     return redirect(data.get("next") or "/learning")
 
 
@@ -1118,19 +1119,7 @@ async def memory_delete(request: web.Request) -> web.Response:
 
 async def channels_page(request: web.Request) -> web.Response:
     bot = request.app[BOT]
-    env_ids = sorted(blocked.BLOCKED_CHANNELS)
-    env_list = (
-        " ".join(f"<code>{e(channel_label(bot, i))}</code>" for i in env_ids)
-        if env_ids
-        else "<span class='note'>none</span>"
-    )
-    parts = [
-        (
-            f"<section><h2>Blocked everywhere (BLOCKED_CHANNELS in .env, read-only)</h2>"
-            f"<p>{env_list}</p></section>"
-        )
-    ]
-
+    parts = []
     per_guild: dict[int, list[int]] = {}
     for guild_id, channel_id in store.all_blocked_channels():
         per_guild.setdefault(guild_id, []).append(channel_id)

@@ -402,7 +402,8 @@ async def test_dms_raise():
 
 
 async def test_a_blocked_channel_raises(monkeypatch):
-    monkeypatch.setattr(blocked, "BLOCKED_CHANNELS", frozenset({10}))
+    monkeypatch.setattr(blocked, "_db_blocked", {10})
+    monkeypatch.setattr(blocked, "_db_loaded", True)
     bot, _ = setup([message(100, person(7, "luka"), "hi")])
     with pytest.raises(agents.ToolError):
         await catchup.catch_up(bot, request())

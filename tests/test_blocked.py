@@ -7,9 +7,8 @@ from debeloglav import blocked
 
 @pytest.fixture(autouse=True)
 def blocked_ids(monkeypatch):
-    monkeypatch.setattr(blocked, "BLOCKED_CHANNELS", frozenset({100, 200}))
-    # start each test with an empty database cache, as if freshly loaded
-    monkeypatch.setattr(blocked, "_db_blocked", set())
+    # start each test with 100 and 200 blocked in the cache, as if freshly loaded
+    monkeypatch.setattr(blocked, "_db_blocked", {100, 200})
     monkeypatch.setattr(blocked, "_db_loaded", True)
 
 

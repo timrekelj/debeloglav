@@ -101,7 +101,6 @@ def clean_tables(monkeypatch):
             db.execute(f"DELETE FROM {table}")
     monkeypatch.setattr(blocked, "_db_blocked", set())
     monkeypatch.setattr(blocked, "_db_loaded", True)
-    monkeypatch.setattr(blocked, "BLOCKED_CHANNELS", frozenset({777}))
 
 
 @pytest.fixture
@@ -190,10 +189,10 @@ def seed() -> int:
     )
     store.save_style(
         "guild:1",
-        store.Style(True, ["general"], "## Ton\nPrijazni.", datetime.now(UTC)),
+        store.Style(True, "## Ton\nPrijazni.", datetime.now(UTC)),
     )
     store.log_style_run("guild:1", 42, "## Ton\nPrijazni.", None)
-    store.log_style_run("guild:1", 3, None, None)
+    store.log_style_run("guild:1", 3, None, None, ["#memes: blocked"])
     store.block_channel(1, 11)
     store.link_messages("ses-1", 101)
     update_setting("extra_instructions", "Bodi zabaven.")
@@ -662,14 +661,15 @@ async def test_every_page_renders_with_seeded_data(logged_in):
         ],
         "/learning": [
             "Testni",
-            "general",
+            "blocked ones",
             "Learned at",
             "History",
             "learned",
             "skipped",
+            "#memes: blocked",
         ],
         "/memories": ["guild:1", "Tim je admin", "Tim (@tim)", "Add a memory"],
-        "/channels": ["777", "Unblock", "Block a channel or category", "Kategorija"],
+        "/channels": ["memes", "Unblock", "Block a channel or category", "Kategorija"],
         "/tasks": ["Spomni me jutri", "Tim (@tim)", "Cancel"],
         "/settings": [
             "reasoning_effort",
@@ -837,7 +837,7 @@ async def test_block_and_unblock_channel(logged_in):
 
 
 async def test_learning_actions(logged_in):
-    store.save_style("guild:1", store.Style(True, None, "## Ton", datetime.now(UTC)))
+    store.save_style("guild:1", store.Style(True, "## Ton", datetime.now(UTC)))
 
     async def post(action: str, **extra):
         return await logged_in.post(
@@ -850,17 +850,12 @@ async def test_learning_actions(logged_in):
     st = store.style("guild:1")
     assert st.guide is None and st.learned_at is None  # relearn: forget and learn again
 
-    assert (await post("enable", channels="general, memes")).status == 303
-    st = store.style("guild:1")
-    assert st.enabled and st.channels == ["general", "memes"]
-
     assert (await post("disable")).status == 303
     st = store.style("guild:1")
     assert not st.enabled and st.guide is None  # off also deletes the guide
 
-    assert (await post("all")).status == 303
-    st = store.style("guild:1")
-    assert st.enabled and st.channels is None  # every public channel
+    assert (await post("enable")).status == 303
+    assert store.style("guild:1").enabled
 
 
 async def test_task_cancel(logged_in):

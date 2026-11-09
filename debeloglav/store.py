@@ -37,7 +37,6 @@ CREATE INDEX IF NOT EXISTS tasks_due ON tasks (active, next_run);
 CREATE TABLE IF NOT EXISTS styles (
     scope TEXT PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 1,
-    channels TEXT,  -- JSON list of channel names to learn from; NULL means every channel
     guide TEXT,
     learned_at TEXT  -- NULL means learn at the next check
 );
@@ -73,7 +72,8 @@ CREATE TABLE IF NOT EXISTS style_runs (
     at TEXT NOT NULL,
     messages INTEGER NOT NULL,
     guide TEXT,  -- NULL when the run was skipped or failed
-    error TEXT
+    error TEXT,
+    skipped TEXT  -- JSON list of "#channel: why" for the channels left out
 );
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -86,7 +86,6 @@ CREATE TABLE IF NOT EXISTS settings (
 @dataclass
 class Style:
     enabled: bool = True
-    channels: list[str] | None = None
     guide: str | None = None
     learned_at: datetime | None = None
 
@@ -138,6 +137,7 @@ class StyleRun:
     messages: int
     guide: str | None
     error: str | None
+    skipped: list[str]
 
 
 def _now() -> str:
@@ -158,6 +158,14 @@ with _connect() as _db:
         row["name"] for row in _db.execute("PRAGMA table_info(memories)")
     }:
         _db.execute("ALTER TABLE memories ADD COLUMN author_id INTEGER")
+    # Databases created before skipped channels were recorded.
+    if "skipped" not in {
+        row["name"] for row in _db.execute("PRAGMA table_info(style_runs)")
+    }:
+        _db.execute("ALTER TABLE style_runs ADD COLUMN skipped TEXT")
+    # Databases from when style learning could be limited to a list of channels.
+    if "channels" in {row["name"] for row in _db.execute("PRAGMA table_info(styles)")}:
+        _db.execute("ALTER TABLE styles DROP COLUMN channels")
 
 
 def add_memory(scope: str, text: str, author: str, author_id: int) -> int:
@@ -307,7 +315,6 @@ def cancel_task(scope: str, task_id: int) -> bool:
 def _style(row: sqlite3.Row) -> Style:
     return Style(
         enabled=bool(row["enabled"]),
-        channels=json.loads(row["channels"]) if row["channels"] else None,
         guide=row["guide"],
         learned_at=datetime.fromisoformat(row["learned_at"])
         if row["learned_at"]
@@ -324,14 +331,13 @@ def style(scope: str) -> Style:
 def save_style(scope: str, style: Style) -> None:
     with _connect() as db:
         db.execute(
-            """INSERT INTO styles (scope, enabled, channels, guide, learned_at) VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO styles (scope, enabled, guide, learned_at) VALUES (?, ?, ?, ?)
                ON CONFLICT (scope) DO UPDATE SET
-                 enabled = excluded.enabled, channels = excluded.channels,
-                 guide = excluded.guide, learned_at = excluded.learned_at""",
+                 enabled = excluded.enabled, guide = excluded.guide,
+                 learned_at = excluded.learned_at""",
             (
                 scope,
                 style.enabled,
-                json.dumps(style.channels) if style.channels else None,
                 style.guide,
                 style.learned_at.isoformat() if style.learned_at else None,
             ),
@@ -342,26 +348,15 @@ def configure_style(
     scope: str,
     *,
     enabled: bool | None = None,
-    channels: list[str] | None = None,
-    all_channels: bool = False,
     relearn: bool = False,
 ) -> Style:
-    """Change and save a server's style-learning settings, and return the saved style.
-
-    Shared by the agent's configure_style_learning tool and the /debeloglav admin commands.
-    """
+    """Change and save a server's style-learning settings (from the dashboard), and return them."""
     current = style(scope)
     if enabled is not None:
         current.enabled = enabled
         if not enabled:
             current.guide = None  # turning learning off also deletes the learned guide
         current.learned_at = None
-    if channels:
-        current.channels = [
-            name.strip().lstrip("#").lower() for name in channels if name.strip()
-        ]
-    if all_channels:
-        current.channels = None
     if relearn:
         current.guide, current.learned_at = None, None
     save_style(scope, current)
@@ -546,12 +541,23 @@ def activity(activity_id: int) -> Activity | None:
 
 
 def log_style_run(
-    scope: str, messages: int, guide: str | None = None, error: str | None = None
+    scope: str,
+    messages: int,
+    guide: str | None = None,
+    error: str | None = None,
+    skipped: list[str] | None = None,
 ) -> None:
     with _connect() as db:
         db.execute(
-            "INSERT INTO style_runs (scope, at, messages, guide, error) VALUES (?, ?, ?, ?, ?)",
-            (scope, _now(), messages, guide, error),
+            "INSERT INTO style_runs (scope, at, messages, guide, error, skipped) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                scope,
+                _now(),
+                messages,
+                guide,
+                error,
+                json.dumps(skipped) if skipped else None,
+            ),
         )
 
 
@@ -563,6 +569,7 @@ def _style_run(row: sqlite3.Row) -> StyleRun:
         messages=row["messages"],
         guide=row["guide"],
         error=row["error"],
+        skipped=json.loads(row["skipped"]) if row["skipped"] else [],
     )
 
 

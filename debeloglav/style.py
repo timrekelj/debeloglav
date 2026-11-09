@@ -18,7 +18,9 @@ FIRST_WINDOW = timedelta(
     days=7
 )  # how far back the first run reads; later runs read since the last one
 CHECK_SECONDS = 15 * 60
-RETRY_AFTER = timedelta(hours=3)  # after a failed run, instead of retrying at every check
+RETRY_AFTER = timedelta(
+    hours=3
+)  # after a failed run, instead of retrying at every check
 MAX_PER_CHANNEL = 200
 MAX_MESSAGES = 1500
 MAX_CHARS = 300
@@ -46,7 +48,7 @@ Rules:
 async def run_forever(bot: discord.Client) -> None:
     """Every CHECK_SECONDS, refresh the guide of each server whose guide is older than LEARN_EVERY."""
     await bot.wait_until_ready()
-    failed_at: dict[str, datetime] = {}
+    missed_at: dict[str, datetime] = {}  # when the last run failed or was skipped
     while True:
         for guild in bot.guilds:
             scope = f"guild:{guild.id}"
@@ -56,65 +58,74 @@ async def run_forever(bot: discord.Client) -> None:
                 continue
             if style.learned_at and now - style.learned_at < LEARN_EVERY:
                 continue
-            if scope in failed_at and now - failed_at[scope] < RETRY_AFTER:
+            if scope in missed_at and now - missed_at[scope] < RETRY_AFTER:
                 continue
             try:
-                await learn(guild, scope, style)
-                failed_at.pop(scope, None)
+                if await learn(guild, scope, style):
+                    missed_at.pop(scope, None)
+                else:
+                    missed_at[scope] = now
             except Exception as e:
-                failed_at[scope] = now
+                missed_at[scope] = now
                 log.exception("Learning the style of %s failed", guild.name)
                 record_style_run(scope, 0, None, f"{type(e).__name__}: {e}")
         await asyncio.sleep(CHECK_SECONDS)
 
 
-async def learn(guild: discord.Guild, scope: str, style: store.Style) -> None:
+async def learn(guild: discord.Guild, scope: str, style: store.Style) -> bool:
+    """Refresh the guide from the messages since the last successful run. Returns whether it learned.
+
+    A skipped run leaves learned_at alone, so the next run still reads everything since the last
+    guide (at most FIRST_WINDOW back) instead of only what was written after the skip.
+    """
     now = datetime.now(UTC)
     since = max(style.learned_at or now - FIRST_WINDOW, now - FIRST_WINDOW)
-    transcript, count = await collect(guild, style.channels, since)
-    guide: str | None = None
-    if count >= MIN_MESSAGES:
-        style.guide = await summarize(style.guide, transcript)
-        guide = style.guide
-        log.info("Learned the style of %s from %d messages", guild.name, count)
-    else:
+    transcript, count, skipped = await collect(guild, since)
+    if count < MIN_MESSAGES:
         log.info(
             "Skipped learning the style of %s: only %d messages since the last run",
             guild.name,
             count,
         )
+        record_style_run(scope, count, None, None, skipped)
+        return False
+    style.guide = await summarize(style.guide, transcript)
     style.learned_at = now
     store.save_style(scope, style)
-    record_style_run(scope, count, guide, None)
+    log.info("Learned the style of %s from %d messages", guild.name, count)
+    record_style_run(scope, count, style.guide, None, skipped)
+    return True
 
 
 def record_style_run(
-    scope: str, messages: int, guide: str | None, error: str | None
+    scope: str,
+    messages: int,
+    guide: str | None,
+    error: str | None,
+    skipped: list[str] | None = None,
 ) -> None:
     """Persist a style-learning run; a database error must never stop learning, so it is only logged."""
     try:
-        store.log_style_run(scope, messages, guide, error)
+        store.log_style_run(scope, messages, guide, error, skipped)
     except Exception:
         log.exception("Could not record the style run of %s", scope)
 
 
-async def collect(
-    guild: discord.Guild, channels: list[str] | None, since: datetime
-) -> tuple[str, int]:
+async def collect(guild: discord.Guild, since: datetime) -> tuple[str, int, list[str]]:
     """The server's recent human messages, grouped by channel, oldest first.
 
-    Without a channel list, only channels everyone in the server can read are used: the guide is
-    shown in every channel, so it must not carry anything from private ones. An admin's explicit
-    channel list is used as given.
+    Every text channel the bot can read is used, except the blocked ones. Also returns the
+    channels that were left out, each as "#name: why", so the dashboard can show it.
     """
     sections: list[str] = []
+    skipped: list[str] = []
     total = 0
     for channel in guild.text_channels:
-        if channels and channel.name not in channels:
+        if blocked.channel(channel):
+            skipped.append(f"#{channel.name}: blocked")
             continue
-        if not channels and not readable(channel, guild.default_role):
-            continue
-        if not readable(channel, guild.me) or blocked.channel(channel):
+        if not readable(channel, guild.me):
+            skipped.append(f"#{channel.name}: the bot can't read its history")
             continue
         lines: list[str] = []
         try:
@@ -125,7 +136,8 @@ async def collect(
                 if message.author.bot or not text:
                     continue
                 lines.append(f"{who(message.author)}: {text[:MAX_CHARS]}")
-        except discord.HTTPException:
+        except discord.HTTPException as e:
+            skipped.append(f"#{channel.name}: {e.status} {e.text or type(e).__name__}")
             continue
         lines = lines[: MAX_MESSAGES - total]
         if lines:
@@ -133,7 +145,7 @@ async def collect(
             total += len(lines)
         if total >= MAX_MESSAGES:
             break
-    return "\n\n".join(sections), total
+    return "\n\n".join(sections), total, skipped
 
 
 def readable(channel: discord.TextChannel, who: discord.Member | discord.Role) -> bool:

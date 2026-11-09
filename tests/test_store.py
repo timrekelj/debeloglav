@@ -86,11 +86,9 @@ def test_style_defaults_and_saving():
     assert store.style("guild:style1") == store.Style()
     learned = datetime(2026, 11, 1, tzinfo=UTC)
     store.save_style(
-        "guild:style1", store.Style(False, ["general", "memes"], "## Ton", learned)
+        "guild:style1", store.Style(False, "## Ton", learned)
     )
-    assert store.style("guild:style1") == store.Style(
-        False, ["general", "memes"], "## Ton", learned
-    )
+    assert store.style("guild:style1") == store.Style(False, "## Ton", learned)
     store.save_style("guild:style1", store.Style())
     assert store.style("guild:style1") == store.Style()
 
@@ -98,21 +96,15 @@ def test_style_defaults_and_saving():
 def test_configure_style():
     scope = "guild:style2"
     learned = datetime(2026, 11, 1, tzinfo=UTC)
-    store.save_style(scope, store.Style(True, ["general"], "## Ton", learned))
+    store.save_style(scope, store.Style(True, "## Ton", learned))
     # turning learning off also deletes the guide and learned_at
     saved = store.configure_style(scope, enabled=False)
-    assert saved == store.Style(False, ["general"], None, None)
+    assert saved == store.Style(False, None, None)
     assert store.style(scope) == saved
-    # channel names are stripped of # and lowercased
-    saved = store.configure_style(scope, enabled=True, channels=["#General", " MEMES "])
-    assert saved.enabled and saved.channels == ["general", "memes"]
     # relearn clears the guide and learned_at, but keeps the settings
-    store.save_style(scope, store.Style(True, ["general"], "## Ton", learned))
+    store.save_style(scope, store.Style(True, "## Ton", learned))
     saved = store.configure_style(scope, relearn=True)
-    assert saved == store.Style(True, ["general"], None, None)
-    # all_channels clears the channel list
-    saved = store.configure_style(scope, channels=["general"], all_channels=True)
-    assert saved.channels is None
+    assert saved == store.Style(True, None, None)
 
 
 def test_blocked_channels_per_server():
@@ -208,7 +200,7 @@ def test_record_activity_never_breaks_answering(monkeypatch):
 
 def test_style_runs_are_logged_newest_first():
     store.log_style_run("guild:sr1", 42, "## Ton\nPrijazen", None)
-    store.log_style_run("guild:sr1", 7, None, None)  # skipped: too few messages
+    store.log_style_run("guild:sr1", 7, None, None, ["#tajno: blocked"])  # skipped
     store.log_style_run("guild:sr2", 100, "## Ton", None)
     store.log_style_run("guild:sr1", 0, None, "RuntimeError: boom")  # failed
     runs = store.style_runs()
@@ -223,6 +215,7 @@ def test_style_runs_are_logged_newest_first():
     assert failed.error == "RuntimeError: boom"
     assert other.scope == "guild:sr2" and other.messages == 100
     assert skipped.messages == 7 and skipped.guide is None and skipped.error is None
+    assert skipped.skipped == ["#tajno: blocked"] and summarized.skipped == []
     assert summarized.messages == 42 and summarized.guide == "## Ton\nPrijazen"
     assert [r.messages for r in store.style_runs("guild:sr1")] == [0, 7, 42]
     assert len(store.style_runs(limit=2)) == 2
@@ -243,10 +236,10 @@ def test_dashboard_reads_everything_across_scopes():
     assert [t.id for t in store.all_tasks()] == [first]  # only active ones by default
     assert [t.id for t in store.all_tasks(active_only=False)] == [first, second]
 
-    store.save_style("guild:a", store.Style(True, ["general"], "## Ton", now))
+    store.save_style("guild:a", store.Style(True, "## Ton", now))
     store.save_style("guild:b", store.Style())
     assert store.all_styles() == [
-        ("guild:a", store.Style(True, ["general"], "## Ton", now)),
+        ("guild:a", store.Style(True, "## Ton", now)),
         ("guild:b", store.Style()),
     ]
 
