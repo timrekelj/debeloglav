@@ -1,21 +1,22 @@
 """The admin dashboard: a small password-protected web UI served by the bot itself.
 
 Enabled only when DASHBOARD_PASSWORD is set (then it listens on DASHBOARD_HOST:DASHBOARD_PORT,
-127.0.0.1:8080 by default). HTTP Basic auth with any username, and a simple CSRF guard: a POST
-whose Origin/Referer host is not the Host header is rejected. Server-rendered HTML with inline
-CSS, plain forms that POST and answer 303, no JavaScript framework. Failed logins are
-rate-limited per client IP and globally (429 with Retry-After), and every response carries
-clickjacking/cache hardening headers.
+127.0.0.1:8080 by default). Login is a server-rendered form at /login (password only, no username):
+the correct password sets a HttpOnly session cookie. A simple CSRF guard rejects a POST whose
+Origin/Referer host is not the Host header. Server-rendered HTML with inline CSS, plain forms
+that POST and answer 303, no JavaScript framework. Failed logins are rate-limited per client IP
+and globally (429 with Retry-After), and every response carries clickjacking/cache hardening
+headers.
 """
 
 import asyncio
-import base64
 import hmac
 import html
 import logging
 import math
 import os
 import re
+import secrets
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -32,43 +33,239 @@ log = logging.getLogger("debeloglav.dashboard")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
-REALM = "debeloglav"
 KINDS = ("reply", "research", "task")
 
 BOT = web.AppKey("bot", object)
 PASSWORD = web.AppKey("password", str | None)
 STARTED = web.AppKey("started", float)
+SESSIONS = web.AppKey("sessions", dict[str, float])  # token -> monotonic expiry
+
+SESSION_COOKIE = "debeloglav_session"
+SESSION_TTL_SECONDS = 7 * 24 * 60 * 60  # one week (in-memory: a restart logs out)
 
 LAYOUT_CSS = """
-body { font-family: system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #1c1e21; }
-nav { display: flex; gap: 4px; background: #2b2f36; padding: 8px 12px; flex-wrap: wrap; }
-nav a { color: #cfd4dc; text-decoration: none; padding: 4px 10px; border-radius: 6px; }
-nav a:hover { background: #3a3f47; }
-nav a.here { background: #4c6ef5; color: #fff; }
-main { padding: 16px 20px; max-width: 1150px; margin: 0 auto; }
-table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 8px; }
-th, td { border: 1px solid #dde1e6; padding: 6px 8px; text-align: left; vertical-align: top;
-         font-size: 14px; }
-th { background: #eef0f3; }
-pre { background: #fff; border: 1px solid #dde1e6; padding: 10px; overflow-x: auto;
-      white-space: pre-wrap; word-break: break-word; font-size: 12.5px; margin: 4px 0; }
+:root {
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --surface-2: #edf0f5;
+  --border: #e4e8ef;
+  --border-strong: #ccd4e0;
+  --text: #1b2430;
+  --muted: #64707f;
+  --hover: #f3f6fa;
+  --accent: #4f46e5;
+  --accent-strong: #4338ca;
+  --accent-soft: #eceafd;
+  --on-accent: #ffffff;
+  --ring: rgba(79, 70, 229, 0.16);
+  --danger-text: #b42318;
+  --danger-border: #f0c6c0;
+  --danger-bg: #fdecea;
+  --ok-text: #177245;
+  --ok-bg: #e4f6ec;
+  --ok-border: #bfe6cd;
+  --warn-text: #8f6400;
+  --warn-bg: #fcf2dd;
+  --warn-border: #f0dfae;
+  --neutral-bg: #eceff4;
+  --neutral-text: #5b6675;
+  --side-bg: #151a24;
+  --side-text: #a6b0c0;
+  --side-hover: rgba(255, 255, 255, 0.07);
+  --side-active: #4f46e5;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1218;
+    --surface: #151c27;
+    --surface-2: #10161f;
+    --border: #242f3e;
+    --border-strong: #313d4f;
+    --text: #e5eaf2;
+    --muted: #939eb0;
+    --hover: #1a2331;
+    --accent: #818cf8;
+    --accent-strong: #a3b0fc;
+    --accent-soft: rgba(129, 140, 248, 0.13);
+    --on-accent: #10131c;
+    --ring: rgba(129, 140, 248, 0.3);
+    --danger-text: #ff8f86;
+    --danger-border: rgba(255, 143, 134, 0.32);
+    --danger-bg: rgba(255, 113, 105, 0.12);
+    --ok-text: #5bd692;
+    --ok-bg: rgba(46, 204, 113, 0.13);
+    --ok-border: rgba(91, 214, 146, 0.3);
+    --warn-text: #e6b95c;
+    --warn-bg: rgba(230, 185, 92, 0.12);
+    --warn-border: rgba(230, 185, 92, 0.3);
+    --neutral-bg: rgba(255, 255, 255, 0.08);
+    --neutral-text: #9aa5b5;
+    --side-bg: #0a0e14;
+    --side-active: #6366f1;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--sans); font-size: 14.5px; line-height: 1.55;
+       background: var(--bg); color: var(--text); }
+a { color: var(--accent); }
+
+/* --- Shell: dark sidebar + content ---------------------------------------------------- */
+.shell { display: flex; min-height: 100vh; }
+.sidebar { width: 238px; flex: 0 0 auto; background: var(--side-bg); display: flex;
+           flex-direction: column; padding: 18px 14px; position: sticky; top: 0;
+           height: 100vh; }
+.brand { display: flex; align-items: center; gap: 10px; color: #fff; text-decoration: none;
+         font-weight: 700; font-size: 17px; letter-spacing: -0.01em; padding: 2px 8px 16px; }
+.brand svg { flex: 0 0 auto; }
+.sidebar nav { display: flex; flex-direction: column; gap: 2px; }
+.sidebar nav a { color: var(--side-text); text-decoration: none; padding: 8px 11px;
+                 border-radius: 8px; font-size: 14px; font-weight: 550; }
+.sidebar nav a:hover { background: var(--side-hover); color: #fff; }
+.sidebar nav a.active { background: var(--side-active); color: #fff; }
+.logout { margin-top: auto; padding-top: 16px; }
+.logout button { width: 100%; background: transparent; border-color: rgba(255, 255, 255, 0.16);
+                 color: var(--side-text); }
+.logout button:hover { background: var(--side-hover); color: #fff; }
+.content { flex: 1; min-width: 0; padding: 30px 38px 64px; }
+.page-head { max-width: 1040px; margin: 0 auto 20px; }
+.page-head h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin: 0; }
+main { max-width: 1040px; margin: 0 auto; }
+@media (max-width: 760px) {
+  .shell { flex-direction: column; }
+  .sidebar { width: 100%; height: auto; position: static; flex-direction: row;
+             align-items: center; flex-wrap: wrap; gap: 2px 8px; padding: 10px 14px; }
+  .brand { padding: 2px 6px 2px 2px; font-size: 16px; }
+  .sidebar nav { flex-direction: row; flex-wrap: wrap; }
+  .sidebar nav a { padding: 6px 9px; font-size: 13px; }
+  .logout { margin: 0 0 0 auto; padding: 0; }
+  .logout button { width: auto; padding: 6px 11px; font-size: 13px; }
+  .content { padding: 20px 16px 48px; }
+  .page-head h1 { font-size: 21px; }
+}
+
+/* --- Login page: centered card --------------------------------------------------------- */
+.auth { min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        padding: 24px 16px;
+        background: radial-gradient(720px 380px at 50% -80px, var(--accent-soft), transparent 70%),
+                    var(--bg); }
+.auth-card { width: 100%; max-width: 380px; background: var(--surface);
+             border: 1px solid var(--border); border-radius: 16px;
+             box-shadow: 0 10px 34px rgba(16, 24, 40, 0.1); padding: 28px 28px 26px; }
+.auth-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px;
+              letter-spacing: -0.01em; margin-bottom: 20px; }
+.auth-card h1 { font-size: 19px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 6px; }
+.auth-card .error { margin: 12px 0 0; }
+.login-form p { margin: 0; }
+.login-form label { margin-top: 16px; }
+.login-form button[type='submit'] { width: 100%; margin-top: 18px; padding: 9px 14px;
+                                    font-weight: 650; background: var(--accent);
+                                    border-color: var(--accent); color: var(--on-accent); }
+.login-form button[type='submit']:hover { background: var(--accent-strong);
+                                          border-color: var(--accent-strong); }
+
+/* --- Cards, headings, notes ------------------------------------------------------------ */
+section { background: var(--surface); border: 1px solid var(--border);
+          border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px 22px;
+          margin: 0 0 18px; }
+h2 { font-size: 15.5px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 12px; }
+h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 4px; }
+.note { color: var(--muted); font-size: 13.5px; margin: 6px 0; }
+.error { background: var(--danger-bg); border: 1px solid var(--danger-border);
+         color: var(--danger-text); padding: 10px 14px; border-radius: 10px;
+         font-size: 13.5px; margin: 0 0 14px; }
+
+/* --- Stat cards (overview counts) ------------------------------------------------------ */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+         gap: 12px; }
+.stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+        padding: 12px 16px; }
+.stat-value { display: block; font-size: 26px; font-weight: 700; letter-spacing: -0.02em;
+              line-height: 1.25; }
+.stat-label { display: block; color: var(--muted); font-size: 12.5px; margin-top: 1px; }
+
+/* --- Tables ---------------------------------------------------------------------------- */
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius);
+              background: var(--surface); box-shadow: var(--shadow); margin: 0 0 18px; }
+section .table-wrap { box-shadow: none; margin-bottom: 0; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th { text-align: left; padding: 9px 14px; font-size: 11.5px; font-weight: 650;
+     text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+     background: var(--surface-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 9px 14px; border-bottom: 1px solid var(--border); text-align: left;
+     vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+.table-wrap tbody tr:hover td { background: var(--hover); }
+table.kv { font-size: 14px; }
+table.kv th, table.kv td { border: none; background: transparent; padding: 8px 0; font-size: 14px;
+                          text-transform: none; letter-spacing: normal; white-space: normal; }
+table.kv th { color: var(--muted); font-weight: 550; width: 180px; }
+table.kv tr + tr th, table.kv tr + tr td { border-top: 1px solid var(--border); }
+td pre { margin: 0; }
+
+/* --- Status pills ----------------------------------------------------------------------- */
+.pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px;
+        font-weight: 600; border: 1px solid transparent; white-space: nowrap; }
+.pill.ok { background: var(--ok-bg); color: var(--ok-text); border-color: var(--ok-border); }
+.pill.err { background: var(--danger-bg); color: var(--danger-text);
+            border-color: var(--danger-border); }
+.pill.warn { background: var(--warn-bg); color: var(--warn-text); border-color: var(--warn-border); }
+.pill.neutral { background: var(--neutral-bg); color: var(--neutral-text); }
+
+/* --- Buttons ---------------------------------------------------------------------------- */
+button { font: inherit; font-size: 13.5px; font-weight: 550; padding: 7px 14px;
+         border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface);
+         color: var(--text); cursor: pointer; }
+button:hover { background: var(--hover); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+button.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+button.danger { background: transparent; color: var(--danger-text);
+                border-color: var(--danger-border); }
+button.danger:hover { background: var(--danger-bg); }
+td button { padding: 4px 10px; font-size: 12.5px; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 form.inline { display: inline; }
-button { font: inherit; padding: 3px 10px; border: 1px solid #b9c0c9; background: #fff;
-         border-radius: 6px; cursor: pointer; }
-button:hover { background: #eef0f3; }
-input[type=text], select, textarea { font: inherit; padding: 4px 6px; border: 1px solid #b9c0c9;
-                                      border-radius: 6px; }
-textarea { width: 100%; min-height: 90px; }
-label { display: block; margin: 8px 0 2px; font-weight: 600; font-size: 13px; }
-.error { background: #fdecea; border: 1px solid #f5c6c0; padding: 8px 12px; border-radius: 6px; }
-.note { color: #5f6672; font-size: 13px; }
-section { margin-bottom: 28px; }
-h2 { font-size: 18px; margin-bottom: 6px; }
-h3 { font-size: 15px; margin-bottom: 4px; }
-code { background: #eef0f3; padding: 1px 4px; border-radius: 4px; }
-td.ok { color: #2b8a3e; }
-td.err { color: #c92a2a; }
-details { margin: 4px 0; }
+
+/* --- Forms ------------------------------------------------------------------------------ */
+label { display: block; margin: 14px 0 6px; font-weight: 600; font-size: 13px; }
+input[type='text'], input[type='password'], select, textarea { font: inherit; font-size: 14px;
+  padding: 8px 11px; border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--surface); color: var(--text); width: 100%; max-width: 560px; }
+textarea { min-height: 110px; resize: vertical; }
+input[type='text']:focus, input[type='password']:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.field-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.field-row select { flex: 1 1 220px; max-width: none; }
+
+/* --- Request filter pills ---------------------------------------------------------------- */
+.filters { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px;
+           background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px;
+           margin: 0 0 16px; }
+.filters a { padding: 5px 13px; border-radius: 999px; text-decoration: none; color: var(--muted);
+             font-size: 13px; font-weight: 550; }
+.filters a:hover { color: var(--text); }
+.filters a.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+
+/* --- Code blocks -------------------------------------------------------------------------- */
+pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px 14px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+      font-family: var(--mono); font-size: 12.5px; line-height: 1.5; margin: 6px 0; }
+code { font-family: var(--mono); font-size: 0.92em; background: var(--surface-2);
+       border: 1px solid var(--border); border-radius: 6px; padding: 1px 5px; }
+pre code { background: none; border: none; padding: 0; }
+details { margin: 10px 0 2px; }
+summary { cursor: pointer; color: var(--accent); font-size: 13px; font-weight: 600; }
+details pre { margin-top: 8px; }
+
+/* --- Focus -------------------------------------------------------------------------------- */
+a:focus-visible, button:focus-visible, summary:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent);
+                                                 outline-offset: 2px; }
 """
 
 NAV = [
@@ -132,35 +329,72 @@ def channel_label(bot: object, channel_id: int | None) -> str:
     return f"{prefix}{name} ({channel_id})"
 
 
-def redirect(location: str) -> NoReturn:
+def safe_next(location: str | None) -> str:
+    """A redirect target that stays on this dashboard: a path starting with '/' but not '//'."""
+    if location and location.startswith("/") and not location.startswith("//"):
+        return location
+    return "/"
+
+
+def redirect(location: str | None) -> NoReturn:
     """303 back to a page of this dashboard (never to another site)."""
-    if not location.startswith("/") or location.startswith("//"):
-        location = "/"
-    raise web.HTTPSeeOther(location=location)
+    raise web.HTTPSeeOther(location=safe_next(location))
 
 
-def page(title: str, body: str, current: str = "/") -> web.Response:
+BRAND_SVG = (
+    "<svg width='24' height='24' viewBox='0 0 24 24' fill='none' aria-hidden='true'>"
+    "<rect x='1' y='1' width='22' height='22' rx='6.5' fill='#6366f1'/>"
+    "<path d='M8.2 6.8h4.1a5.2 5.2 0 0 1 0 10.4H8.2V6.8z' fill='#fff'/>"
+    "</svg>"
+)
+
+
+def page(
+    title: str, body: str, current: str = "/", nav: bool = True, status: int = 200
+) -> web.Response:
+    """Wrap a page body in the app shell: a dark sidebar with the nav (or, with nav=False,
+    the centered login card)."""
     links = []
     for href, label in NAV:
-        here = ' class="here"' if href == current else ""
-        links.append(f'<a href="{e(href)}"{here}>{e(label)}</a>')
-    nav = "".join(links)
+        active = ' class="active"' if href == current else ""
+        links.append(f'<a href="{e(href)}"{active}>{e(label)}</a>')
+    if nav:
+        chrome = (
+            "<div class='shell'>"
+            "<aside class='sidebar'>"
+            f"<a class='brand' href='/'>{BRAND_SVG}<span>Debeloglav</span></a>"
+            f"<nav>{''.join(links)}</nav>"
+            "<form class='logout' method='post' action='/logout'>"
+            "<button type='submit'>Log out</button></form>"
+            "</aside>"
+            "<div class='content'>"
+            f"<header class='page-head'><h1>{e(title)}</h1></header>"
+            f"<main>{body}</main>"
+            "</div></div>"
+        )
+    else:
+        chrome = (
+            "<div class='auth'><div class='auth-card'>"
+            f"<div class='auth-brand'>{BRAND_SVG}<span>Debeloglav</span></div>"
+            f"<h1>{e(title)}</h1>{body}</div></div>"
+        )
     return web.Response(
         text="<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{e(title)} · Debeloglav dashboard</title>"
-        f"<style>{LAYOUT_CSS}</style></head><body>"
-        f"<nav>{nav}</nav><main><h1>{e(title)}</h1>{body}</main></body></html>",
+        f"<style>{LAYOUT_CSS}</style></head><body>{chrome}</body></html>",
         content_type="text/html",
+        status=status,
     )
 
 
 # --- Security ------------------------------------------------------------------------------------
 
-# Brute-force protection for the Basic auth: after PER_IP_FAILURE_LIMIT failed logins from one
+# Brute-force protection for the login form: after PER_IP_FAILURE_LIMIT failed logins from one
 # client IP within FAILURE_WINDOW seconds, that IP is locked out for LOCKOUT_SECONDS (429 with
 # Retry-After, checked before the password, so a correct guess during the lockout does not help).
-# More than GLOBAL_FAILURE_LIMIT failures from all IPs together lock out every request for the
-# same time, except ones with the correct password. The client IP is the TCP peer, unless the
+# More than GLOBAL_FAILURE_LIMIT failures from all IPs together lock out every login attempt for
+# the same time, except ones with the correct password. The client IP is the TCP peer, unless the
 # peer is listed in DASHBOARD_TRUSTED_PROXIES: then it is the right-most X-Forwarded-For entry
 # that is not itself a trusted proxy (without a trusted proxy the header is ignored, it is
 # spoofable).
@@ -295,17 +529,100 @@ def _trusted_proxies() -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def _authorized(request: web.Request, password: str) -> bool:
-    """HTTP Basic auth: any username, the password compared in constant time."""
-    scheme, _, encoded = request.headers.get("Authorization", "").partition(" ")
-    if scheme.lower() != "basic" or not encoded:
+# --- Login form and session cookies ----------------------------------------------------------------
+
+
+def _new_session(app: web.Application) -> str:
+    """A fresh random session token, stored on the app with its expiry (in-memory, so a restart
+    logs everyone out); expired ones are pruned on the way so the dict stays bounded."""
+    sessions: dict[str, float] = app[SESSIONS]
+    now = time.monotonic()
+    for token, expiry in list(sessions.items()):
+        if expiry <= now:
+            del sessions[token]
+    token = secrets.token_urlsafe(32)
+    sessions[token] = now + SESSION_TTL_SECONDS
+    return token
+
+
+def _session_valid(request: web.Request) -> bool:
+    """Whether the request carries a live session cookie."""
+    token = request.cookies.get(SESSION_COOKIE, "")
+    sessions: dict[str, float] = request.app[SESSIONS]
+    expiry = sessions.get(token)
+    if expiry is None:
         return False
-    try:
-        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
+    if expiry <= time.monotonic():
+        del sessions[token]  # expired
         return False
-    _, _, given = decoded.partition(":")
-    return hmac.compare_digest(given.encode(), password.encode())
+    return True
+
+
+def login_form(
+    next_url: str, error: str | None = None, status: int = 200
+) -> web.Response:
+    """The /login page: a centered card with the brand, without the sidebar nav."""
+    error_html = f"<p class='error'>{e(error)}</p>" if error else ""
+    body = (
+        f"{error_html}"
+        "<form class='login-form' method='post' action='/login'>"
+        f"<input type='hidden' name='next' value='{e(next_url)}'>"
+        "<label for='password'>Password</label>"
+        "<input type='password' name='password' id='password' required autofocus>"
+        "<p><button type='submit'>Log in</button></p>"
+        "</form>"
+    )
+    return page("Log in", body, nav=False, status=status)
+
+
+async def login_page(request: web.Request) -> web.Response:
+    """GET /login: the form, keeping a safe `next` to land on after logging in."""
+    return login_form(safe_next(request.query.get("next")))
+
+
+async def login_post(request: web.Request) -> web.Response:
+    """POST /login: check the password in constant time; on success set the session cookie and
+    303 to `next`, on failure re-render the form with 401 and count the failure."""
+    password = request.app[PASSWORD] or ""
+    limiter: LoginLimiter = request.app[LIMITER]
+    ip = limiter.client_ip(request)
+    retry = limiter.ip_retry_after(ip)
+    if retry is not None:
+        return _too_many_requests(
+            retry
+        )  # locked IP: refused before the password is checked
+    data = await request.post()
+    given = str(data.get("password") or "")
+    next_url = safe_next(str(data.get("next") or request.query.get("next")))
+    global_retry = limiter.global_retry_after()
+    if global_retry is not None:
+        # Global lockout against distributed guessing: only the correct password gets through,
+        # and failures are not counted while it lasts.
+        if not hmac.compare_digest(given.encode(), password.encode()):
+            return _too_many_requests(global_retry)
+    elif not hmac.compare_digest(given.encode(), password.encode()):
+        limiter.record_failure(ip)
+        return login_form(next_url, error="Wrong password.", status=401)
+    limiter.record_success(ip)
+    token = _new_session(request.app)
+    response = web.HTTPSeeOther(location=safe_next(next_url))
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="Strict",
+        path="/",
+    )
+    raise response
+
+
+async def logout(request: web.Request) -> web.Response:
+    """POST /logout: drop the session, clear the cookie, 303 back to the login page."""
+    request.app[SESSIONS].pop(request.cookies.get(SESSION_COOKIE, ""), None)
+    response = web.HTTPSeeOther(location="/login")
+    response.del_cookie(SESSION_COOKIE, path="/")
+    raise response
 
 
 def _same_origin(request: web.Request) -> bool:
@@ -333,34 +650,13 @@ async def _guard(request: web.Request, handler):
             status=503,
             text="The admin dashboard is disabled (DASHBOARD_PASSWORD is not set).",
         )
-    limiter: LoginLimiter = request.app[LIMITER]
-    ip = limiter.client_ip(request)
-    retry = limiter.ip_retry_after(ip)
-    if retry is not None:
-        return _too_many_requests(
-            retry
-        )  # locked IP: refused before the password is checked
-    global_retry = limiter.global_retry_after()
-    if global_retry is not None:
-        # Global lockout against distributed guessing: only the correct password gets through,
-        # and failures are not counted while it lasts.
-        if not _authorized(request, password):
-            return _too_many_requests(global_retry)
-        limiter.record_success(ip)
-    elif not _authorized(request, password):
-        if "Authorization" in request.headers:
-            limiter.record_failure(
-                ip
-            )  # wrong or malformed credentials count as failures
-        return web.Response(
-            status=401,
-            text="Unauthorized",
-            headers={"WWW-Authenticate": f'Basic realm="{REALM}"'},
-        )
-    else:
-        limiter.record_success(ip)
     if request.method == "POST" and not _same_origin(request):
         return web.Response(status=403, text="Cross-origin POST rejected.")
+    if request.path != "/login" and not _session_valid(request):
+        # Not logged in: 303 to the login form, remembering where the browser wanted to go
+        # (the same for GET and POST — after logging in it lands on that page). The login
+        # form itself is public; its own POST is rate-limited in login_post.
+        redirect("/login?" + urlencode({"next": request.path_qs}))
     return await handler(request)
 
 
@@ -380,6 +676,7 @@ def make_app(
     app[PASSWORD] = password
     app[STARTED] = time.monotonic()
     app[LIMITER] = LoginLimiter(clock=clock, trusted_proxies=_trusted_proxies())
+    app[SESSIONS] = {}
 
     async def _add_security_headers(
         request: web.Request, response: web.StreamResponse
@@ -388,6 +685,9 @@ def make_app(
             response.headers[name] = value
 
     app.on_response_prepare.append(_add_security_headers)  # fires for every response
+    app.router.add_get("/login", login_page, name="login")
+    app.router.add_post("/login", login_post, name="login_post")
+    app.router.add_post("/logout", logout, name="logout")
     app.router.add_get("/", overview, name="overview")
     app.router.add_get("/requests", requests_page, name="requests")
     app.router.add_get("/requests/{id}", request_detail, name="request_detail")
@@ -453,7 +753,7 @@ async def overview(request: web.Request) -> web.Response:
 
     rows = "".join(
         f"<tr><td>{e(scope_label(bot, scope))}</td><td>{e(fmt_time(run.at))}</td>"
-        f"<td>{run.messages}</td><td>{e(run_status(run))}</td></tr>"
+        f"<td>{run.messages}</td><td>{status_pill(run_status(run))}</td></tr>"
         for scope, run in sorted(last_run.items())
     )
     error_rows = "".join(
@@ -462,37 +762,50 @@ async def overview(request: web.Request) -> web.Response:
         f"<td>{e(scope_label(bot, a.scope))}</td><td>{e(snippet(a.error, 120))}</td></tr>"
         for a in [a for a in activity if not a.ok][:5]
     )
+    connected = (
+        "<span class='pill ok'>yes</span>"
+        if bot.is_ready()
+        else "<span class='pill err'>no</span>"
+    )
     body = f"""
-<section><h2>Bot</h2><table>
+<section><h2>Bot</h2><table class='kv'>
 <tr><th>User</th><td>{e(user_name)} (id {e(getattr(user, "id", "—"))})</td></tr>
-<tr><th>Connected</th><td>{"yes" if bot.is_ready() else "no"}</td></tr>
+<tr><th>Connected</th><td>{connected}</td></tr>
 <tr><th>Latency</th><td>{f"{latency:.3f} s" if latency is not None else "—"}</td></tr>
 <tr><th>Uptime</th><td>{e(uptime)}</td></tr>
 <tr><th>Guilds</th><td>{len(guilds)}: {
         e(", ".join(g.name for g in guilds) or "—")
     }</td></tr>
 </table></section>
-<section><h2>Counts</h2><table>
-<tr><th>Requests, last 24 h</th><td>{len(last_day)}</td></tr>
-<tr><th>Errors, last 24 h</th><td>{len(errors)}</td></tr>
-<tr><th>Memories</th><td>{len(store.all_memories())}</td></tr>
-<tr><th>Active tasks</th><td>{len(store.all_tasks())}</td></tr>
-<tr><th>Open conversations</th><td>{store.conversation_count()}</td></tr>
-</table></section>
+<section><h2>Counts</h2><div class='stats'>
+<div class='stat'><span class='stat-value'>{
+        len(last_day)
+    }</span><span class='stat-label'>Requests, last 24 h</span></div>
+<div class='stat'><span class='stat-value'>{
+        len(errors)
+    }</span><span class='stat-label'>Errors, last 24 h</span></div>
+<div class='stat'><span class='stat-value'>{
+        len(store.all_memories())
+    }</span><span class='stat-label'>Memories</span></div>
+<div class='stat'><span class='stat-value'>{
+        len(store.all_tasks())
+    }</span><span class='stat-label'>Active tasks</span></div>
+<div class='stat'><span class='stat-value'>{
+        store.conversation_count()
+    }</span><span class='stat-label'>Open conversations</span></div>
+</div></section>
 <section><h2>Last style run per guild</h2>
 {
-        "<table><tr><th>Guild</th><th>At</th><th>Messages</th><th>Result</th></tr>"
-        + rows
-        + "</table>"
+        "<div class='table-wrap'><table><tr><th>Guild</th><th>At</th><th>Messages</th>"
+        "<th>Result</th></tr>" + rows + "</table></div>"
         if rows
         else "<p class='note'>No style runs yet.</p>"
     }
 </section>
 <section><h2>Last 5 errors</h2>
 {
-        "<table><tr><th>At</th><th>Kind</th><th>Request</th><th>Guild</th><th>Error</th></tr>"
-        + error_rows
-        + "</table>"
+        "<div class='table-wrap'><table><tr><th>At</th><th>Kind</th><th>Request</th><th>Guild</th>"
+        "<th>Error</th></tr>" + error_rows + "</table></div>"
         if error_rows
         else "<p class='note'>No errors recorded.</p>"
     }
@@ -509,6 +822,22 @@ def run_status(run: store.StyleRun) -> str:
     return "skipped (too few messages)"
 
 
+def status_pill(text: str) -> str:
+    """A style-run status as a coloured pill: errors red, learned green, skipped amber."""
+    if text.startswith("error:"):
+        return f"<span class='pill err'>{e(text)}</span>"
+    if text == "learned":
+        return "<span class='pill ok'>learned</span>"
+    return f"<span class='pill warn'>{e(text)}</span>"
+
+
+def result_pill(a: store.Activity) -> str:
+    """A request's result as a coloured pill: ok green, failure red with the error."""
+    if a.ok:
+        return "<span class='pill ok'>✓ ok</span>"
+    return f"<span class='pill err'>✗ {e(snippet(a.error, 60))}</span>"
+
+
 # --- Requests ------------------------------------------------------------------------------------
 
 
@@ -522,37 +851,40 @@ async def requests_page(request: web.Request) -> web.Response:
     if errors_only:
         rows = [a for a in rows if not a.ok]
 
-    filters = " ".join(
-        f'<a href="/requests?{urlencode(f)}">{e(label)}</a>'
-        for f, label in [
-            ({}, "all"),
-            ({"kind": "reply"}, "replies"),
-            ({"kind": "research"}, "research"),
-            ({"kind": "task"}, "tasks"),
-            ({"errors": "1"}, "errors only"),
+    active_filter = "errors" if errors_only else (kind if kind in KINDS else "")
+    filters = "".join(
+        f'<a href="/requests?{urlencode(f)}"'
+        + (' class="active"' if key == active_filter else "")
+        + f">{e(label)}</a>"
+        for f, label, key in [
+            ({}, "all", ""),
+            ({"kind": "reply"}, "replies", "reply"),
+            ({"kind": "research"}, "research", "research"),
+            ({"kind": "task"}, "tasks", "task"),
+            ({"errors": "1"}, "errors only", "errors"),
         ]
     )
     table_rows = "".join(
         f"<tr><td>{e(fmt_time(a.at))}</td><td>{e(a.kind)}</td>"
         f"<td>{e(scope_label(bot, a.scope))}</td><td>{e(channel_label(bot, a.channel_id))}</td>"
         f"<td>{e(a.user_name or '—')}</td><td>{e(snippet(a.question))}</td>"
-        f"<td class='{'err' if not a.ok else 'ok'}'>"
-        f"{'✗ ' + e(snippet(a.error, 60)) if not a.ok else '✓ ok'}</td>"
+        f"<td>{result_pill(a)}</td>"
         f"<td>{a.duration_ms if a.duration_ms is not None else '—'} ms</td>"
         f'<td><a href="/requests/{a.id}">#{a.id}</a></td></tr>'
         for a in rows
     )
     header = (
+        "<div class='table-wrap'>"
         f"<table><tr><th>Time ({e(TIMEZONE.key)})</th><th>Kind</th><th>Guild</th>"
         "<th>Channel</th><th>User</th><th>Question</th><th>Result</th><th>Duration</th>"
         "<th></th></tr>"
     )
     table = (
-        header + table_rows + "</table>"
+        header + table_rows + "</table></div>"
         if table_rows
         else "<p class='note'>No requests recorded yet.</p>"
     )
-    body = f"<p class='note'>Filter: {filters}</p>{table}"
+    body = f"<div class='filters'>{filters}</div>{table}"
     return page("Requests", body, current="/requests")
 
 
@@ -569,11 +901,16 @@ async def request_detail(request: web.Request) -> web.Response:
     def row(label: str, value: str) -> str:
         return f"<tr><th>{e(label)}</th><td>{value}</td></tr>"
 
-    def block(label: str, text: str | None) -> str:
-        return row(label, f"<pre>{e(text or '(none)')}</pre>")
+    def block(text: str | None) -> str:
+        return f"<pre>{e(text or '(none)')}</pre>"
 
+    ok_pill = (
+        "<span class='pill ok'>yes</span>"
+        if a.ok
+        else "<span class='pill err'>no</span>"
+    )
     body = f"""
-<table>
+<section><h2>Details</h2><table class='kv'>
 {row("ID", f'<a href="/requests/{a.id}">#{a.id}</a>')}
 {row("Time", e(f"{fmt_time(a.at)} ({TIMEZONE.key})"))}
 {row("Kind", e(a.kind))}
@@ -581,16 +918,12 @@ async def request_detail(request: web.Request) -> web.Response:
 {row("Channel", e(channel_label(bot, a.channel_id)))}
 {row("User", e(a.user_name or "—"))}
 {row("Duration", f"{a.duration_ms} ms" if a.duration_ms is not None else "—")}
-{row("OK", "yes" if a.ok else "no")}
-</table>
-<h2>Question</h2>
-{block("Question", a.question)}
-<h2>Prompt sent to the model</h2>
-{block("Prompt", a.prompt)}
-<h2>Reply</h2>
-{block("Reply", a.reply)}
-<h2>Error</h2>
-{block("Error", a.error)}
+{row("OK", ok_pill)}
+</table></section>
+<section><h2>Question</h2>{block(a.question)}</section>
+<section><h2>Prompt sent to the model</h2>{block(a.prompt)}</section>
+<section><h2>Reply</h2>{block(a.reply)}</section>
+<section><h2>Error</h2>{block(a.error)}</section>
 """
     return page(f"Request #{a.id}", body, current="/requests")
 
@@ -658,9 +991,14 @@ async def learning_page(request: web.Request) -> web.Response:
             if st.guide
             else "<p class='note'>No guide learned.</p>"
         )
+        enabled_pill = (
+            "<span class='pill ok'>enabled</span>"
+            if st.enabled
+            else "<span class='pill neutral'>disabled</span>"
+        )
         parts.append(
-            f"<section><h2>{e(guild.name)} ({e(scope)})</h2><table>"
-            f"<tr><th>Enabled</th><td>{'yes' if st.enabled else 'no'}</td></tr>"
+            f"<section><h2>{e(guild.name)} ({e(scope)})</h2><table class='kv'>"
+            f"<tr><th>Enabled</th><td>{enabled_pill}</td></tr>"
             f"<tr><th>Channels</th><td>{e(channels)}</td></tr>"
             f"<tr><th>Learned at</th><td>{e(fmt_time(st.learned_at))}</td></tr>"
             f"<tr><th>Next due</th><td>{e(due)}</td></tr></table>{guide}"
@@ -669,24 +1007,24 @@ async def learning_page(request: web.Request) -> web.Response:
             f"<input type='hidden' name='next' value='/learning'>"
             f"<label>Channel names to learn from (comma or space separated, empty = unchanged)</label>"
             f"<input type='text' name='channels' value='{e(', '.join(st.channels or []))}'>"
-            f"<p><button type='submit' name='action' value='enable'>Enable</button> "
-            f"<button type='submit' name='action' value='disable'>Disable</button> "
+            f"<div class='btn-row'>"
+            f"<button type='submit' name='action' value='enable'>Enable</button> "
+            f"<button type='submit' name='action' value='disable' class='danger'>Disable</button> "
             f"<button type='submit' name='action' value='relearn'>Relearn now</button> "
-            f"<button type='submit' name='action' value='all'>Learn from all public channels</button></p>"
-            f"</form></section>"
+            f"<button type='submit' name='action' value='all'>Learn from all public channels</button>"
+            f"</div></form></section>"
         )
 
     runs = store.style_runs(limit=200)
     run_rows = "".join(
         f"<tr><td>{e(fmt_time(r.at))}</td><td>{e(scope_label(bot, r.scope))}</td>"
-        f"<td>{r.messages}</td><td>{e(run_status(r))}</td>"
+        f"<td>{r.messages}</td><td>{status_pill(run_status(r))}</td>"
         f"<td><details><summary>guide</summary><pre>{e(r.guide or '(none)')}</pre></details></td></tr>"
         for r in runs
     )
     history = (
-        "<table><tr><th>Time</th><th>Guild</th><th>Messages</th><th>Result</th><th>Guide</th></tr>"
-        + run_rows
-        + "</table>"
+        "<div class='table-wrap'><table><tr><th>Time</th><th>Guild</th><th>Messages</th>"
+        "<th>Result</th><th>Guide</th></tr>" + run_rows + "</table></div>"
         if run_rows
         else "<p class='note'>No style runs yet.</p>"
     )
@@ -729,12 +1067,13 @@ async def memories_page(request: web.Request) -> web.Response:
             f"<input type='hidden' name='scope' value='{e(scope)}'>"
             f"<input type='hidden' name='id' value='{m.id}'>"
             f"<input type='hidden' name='next' value='/memories'>"
-            f"<button type='submit'>Delete</button></form></td></tr>"
+            f"<button type='submit' class='danger'>Delete</button></form></td></tr>"
             for m in groups[scope]
         )
         parts.append(
             f"<section><h2>{e(scope_label(bot, scope))}</h2>"
-            f"<table><tr><th>ID</th><th>Memory</th><th>Author</th><th></th></tr>{rows}</table></section>"
+            f"<div class='table-wrap'><table><tr><th>ID</th><th>Memory</th><th>Author</th>"
+            f"<th></th></tr>{rows}</table></div></section>"
         )
     if not parts:
         parts.append("<p class='note'>No memories yet.</p>")
@@ -749,7 +1088,8 @@ async def memories_page(request: web.Request) -> web.Response:
         f"<input type='hidden' name='next' value='/memories'>"
         f"<label>Scope</label><select name='scope'>{options}</select>"
         f"<label>Text</label><input type='text' name='text' required size='80'>"
-        f"<p><button type='submit'>Add</button></p></form></section>"
+        f"<div class='btn-row'><button type='submit' class='primary'>Add</button></div>"
+        f"</form></section>"
     )
     return page("Memories", "".join(parts), current="/memories")
 
@@ -780,7 +1120,7 @@ async def channels_page(request: web.Request) -> web.Response:
     bot = request.app[BOT]
     env_ids = sorted(blocked.BLOCKED_CHANNELS)
     env_list = (
-        ", ".join(f"<code>{e(channel_label(bot, i))}</code>" for i in env_ids)
+        " ".join(f"<code>{e(channel_label(bot, i))}</code>" for i in env_ids)
         if env_ids
         else "<span class='note'>none</span>"
     )
@@ -807,7 +1147,9 @@ async def channels_page(request: web.Request) -> web.Response:
             for cid in blocked_ids
         )
         table = (
-            "<table><tr><th>Blocked</th><th></th></tr>" + rows + "</table>"
+            "<div class='table-wrap'><table><tr><th>Blocked</th><th></th></tr>"
+            + rows
+            + "</table></div>"
             if rows
             else "<p class='note'>Nothing blocked on this server.</p>"
         )
@@ -824,8 +1166,8 @@ async def channels_page(request: web.Request) -> web.Response:
             f"<input type='hidden' name='guild_id' value='{guild.id}'>"
             f"<input type='hidden' name='next' value='/channels'>"
             f"<label>Block a channel or category</label>"
-            f"<select name='channel_id'>{options}</select> "
-            f"<button type='submit'>Block</button></form></section>"
+            f"<div class='field-row'><select name='channel_id'>{options}</select>"
+            f"<button type='submit' class='danger'>Block</button></div></form></section>"
         )
     return page("Channels", "".join(parts), current="/channels")
 
@@ -868,12 +1210,13 @@ async def tasks_page(request: web.Request) -> web.Response:
         f"<input type='hidden' name='scope' value='{e(t.scope)}'>"
         f"<input type='hidden' name='id' value='{t.id}'>"
         f"<input type='hidden' name='next' value='/tasks'>"
-        f"<button type='submit'>Cancel</button></form></td></tr>"
+        f"<button type='submit' class='danger'>Cancel</button></form></td></tr>"
         for t in tasks
     )
     body = (
-        "<table><tr><th>ID</th><th>Guild</th><th>Channel</th><th>Created by</th><th>Prompt</th>"
-        "<th>Schedule</th><th>Flags</th><th></th></tr>" + rows + "</table>"
+        "<div class='table-wrap'><table><tr><th>ID</th><th>Guild</th><th>Channel</th>"
+        "<th>Created by</th><th>Prompt</th>"
+        "<th>Schedule</th><th>Flags</th><th></th></tr>" + rows + "</table></div>"
         if rows
         else "<p class='note'>No active tasks.</p>"
     )
@@ -920,9 +1263,9 @@ async def settings_page(request: web.Request) -> web.Response:
             f"<form method='post' action='/settings'>"
             f"<input type='hidden' name='key' value='{e(key)}'>"
             f"<input type='hidden' name='next' value='/settings'>"
-            f"<label>Value</label>{field}<p>"
-            f"<button type='submit'>Save</button> "
-            f"<button type='submit' name='reset' value='1'>Reset to default</button></p>"
+            f"<label>Value</label>{field}"
+            f"<div class='btn-row'><button type='submit' class='primary'>Save</button> "
+            f"<button type='submit' name='reset' value='1'>Reset to default</button></div>"
             f"</form></section>"
         )
     return page("Settings", "".join(parts), current="/settings")
