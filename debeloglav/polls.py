@@ -4,7 +4,7 @@ from datetime import datetime
 
 import discord
 
-from .context import TIMEZONE
+from .context import timezone
 
 
 def describe(poll: discord.Poll) -> str:
@@ -74,7 +74,7 @@ def _line(
     if ended:
         state = "ended"
     elif expires_at:
-        state = f"open until {expires_at.astimezone(TIMEZONE):%Y-%m-%d %H:%M}"
+        state = f"open until {expires_at.astimezone(timezone()):%Y-%m-%d %H:%M}"
     else:
         state = "open"
     if multiple:

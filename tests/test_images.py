@@ -9,7 +9,7 @@ import pytest
 from mistralai import agents
 from mistralai.client import models as api_models
 
-from debeloglav import agent, bot, context
+from debeloglav import agent, bot, context, settings
 from debeloglav.context import Found, FoundImage, Request
 
 NOW = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
@@ -323,7 +323,7 @@ async def test_edit_image_falls_back_to_a_labelled_regeneration(env):
     assert "new version" in result
     # the image was described with the vision model, and the change appended to the prompt
     assert len(env.chat.calls) == 1
-    assert env.chat.calls[0]["model"] == agent.MODEL
+    assert env.chat.calls[0]["model"] == settings.get("model")
     prompt = env.conversations.calls[2]["inputs"]
     assert "add a red top hat" in prompt
     assert "A grey cat on a red sofa" in prompt

@@ -29,6 +29,7 @@ from . import (
     mentions,
     polls,
     scheduler,
+    settings,
     store,
     style,
 )
@@ -40,14 +41,11 @@ from .agent import (
     settings_version,
     style_prompt,
 )
-from .context import TIMEZONE, Request
+from .context import Request, timezone
+from .trace import Trace
 
 log = logging.getLogger("debeloglav")
 
-CONTEXT_MESSAGES = int(os.environ.get("CONTEXT_MESSAGES", "10"))
-MAX_RESEARCH_JOBS = int(os.environ.get("MAX_RESEARCH_JOBS", "3"))
-RESEARCH_TIMEOUT = 20 * 60
-SESSION_IDLE_SECONDS = 6 * 60 * 60
 REPLY_CHAIN_DEPTH = 8
 MAX_IMAGES = 8
 MAX_SOURCES = 5
@@ -72,10 +70,7 @@ DISCORD_LIMIT = 2000
 # (in Docker both land in the mounted data/ volume).
 SESSIONS_DIR = store.DB_PATH.parent / "sessions"
 
-THINKING = "🤔"  # used where the server has no THINKING_EMOTE
-THINKING_EMOTE = os.environ.get(
-    "THINKING_EMOTE", "hmmmm"
-)  # the server's custom emote, by name
+THINKING = "🤔"  # used where the server has no thinking_emote
 RESEARCHING = "🔬"
 
 # The bot doesn't tag anyone. Only a reply pings the person it answers, and a reminder the person
@@ -83,6 +78,11 @@ RESEARCHING = "🔬"
 ALLOWED_MENTIONS = discord.AllowedMentions(
     everyone=False, roles=False, users=False, replied_user=True
 )
+
+
+def session_idle() -> timedelta:
+    """How long a conversation stays open after its last use (the session_idle_hours setting)."""
+    return timedelta(hours=settings.get_int("session_idle_hours"))
 
 
 class Conversations:
@@ -107,9 +107,7 @@ class Conversations:
 
     def idle(self) -> list[str]:
         """Forget the sessions nobody used for a while, and return their ids to cancel."""
-        cutoff = (
-            datetime.now(UTC) - timedelta(seconds=SESSION_IDLE_SECONDS)
-        ).isoformat()
+        cutoff = (datetime.now(UTC) - session_idle()).isoformat()
         stale = [
             session_id
             for session_id in store.sessions_idle_since(cutoff)
@@ -178,35 +176,57 @@ class Debeloglav(discord.Client):
             and message.author.guild_permissions.manage_guild,
         )
 
+        trace = Trace()
+        trace.info.update(
+            message_id=message.id,
+            message_url=message.jump_url,
+            continuing=session_id is not None,
+            attachments=len(message.attachments),
+        )
         thinking = thinking_emoji(message.guild)
-        await react(message, thinking)
+        with trace.stage("react"):
+            await react(message, thinking)
         started = time.monotonic()
         content: list[dict[str, str]] | None = None
         error: str | None = None
         try:
-            content = await self.build_content(
-                message, request, continuing=session_id is not None
-            )
+            with trace.stage("context"):
+                content = await self.build_content(
+                    message, request, continuing=session_id is not None
+                )
             try:
                 session_id, state = await self.run_turn(
-                    self.agent, session_id, request, content
+                    self.agent, session_id, request, content, trace=trace
                 )
             except (agents.SessionTerminatedError, agents.SessionNotFoundError):
                 # The conversation's session ended: start over with the full context.
-                content = await self.build_content(message, request, continuing=False)
+                trace.step("session_restarted")
+                with trace.stage("context"):
+                    content = await self.build_content(
+                        message, request, continuing=False
+                    )
                 session_id, state = await self.run_turn(
-                    self.agent, None, request, content
+                    self.agent, None, request, content, trace=trace
                 )
-            text, files = await render(parse(state, session_id))
+            with trace.stage("render"):
+                text, files = await render(parse(state, session_id))
         except Exception as e:
             log.exception("Failed to answer %s", message.jump_url)
             error = f"{type(e).__name__}: {e}"
             text, files = "Ojoj, nekaj je šlo narobe. Poskusi znova čez trenutek.", []
         finally:
-            await unreact(message, thinking, self.user)
+            with trace.stage("unreact"):
+                await unreact(message, thinking, self.user)
 
-        text = await mentions.untag(message.guild, text)
-        sent = await reply_chunks(message, text, files)
+        with trace.stage("send"):
+            text = await mentions.untag(message.guild, text)
+            sent = await reply_chunks(message, text, files)
+        trace.info.update(
+            session_id=session_id,
+            reply_messages=len(sent),
+            files=len(files),
+            **content_stats(content),
+        )
         record_activity(
             kind="reply",
             scope=request.scope,
@@ -218,6 +238,7 @@ class Debeloglav(discord.Client):
             ok=error is None,
             error=error,
             duration_ms=int((time.monotonic() - started) * 1000),
+            trace=trace.as_dict(),
         )
         if session_id:
             self.conversations.link(session_id, message.id, *(m.id for m in sent))
@@ -235,6 +256,7 @@ class Debeloglav(discord.Client):
         if version == self._settings_version:
             return False
         self.agent = build_agent()
+        self.research_agent = build_research_agent()
         self._settings_version = version
         log.info("Admin settings changed, rebuilt the agent: %s", version)
         return True
@@ -245,22 +267,40 @@ class Debeloglav(discord.Client):
         session_id: str | None,
         request: Request,
         content: list[dict[str, str]],
+        trace: Trace | None = None,
     ) -> tuple[str, agents.TurnState]:
-        """Run one turn in the conversation's session, or in a new one, with the request registered for tools."""
+        """Run one turn in the conversation's session, or in a new one, with the request registered for tools.
+
+        With a trace, the turn's steps and the time spent waiting for its session are recorded.
+        """
+        trace = trace or Trace()
         if self.apply_settings():
             agent = self.agent  # the caller read self.agent before the settings changed
-        session = (
-            agent.session(session_id) if session_id else await agent.start_session()
+        trace.info.update(
+            model=getattr(agent, "model", None),
+            reasoning_effort=getattr(agent, "reasoning_effort", None),
         )
-        async with self.conversations.lock(session.id):
+        with trace.stage("session_start"):
+            session = (
+                agent.session(session_id) if session_id else await agent.start_session()
+            )
+        with trace.stage("lock_wait"):
+            lock = self.conversations.lock(session.id)
+            await lock.acquire()
+        try:
             context.register(session.id, request)
             context.take_found(session.id)  # start the turn with nothing recorded
-            state = await session.run(content)
-            while isinstance(
-                state, agents.Busy
-            ):  # a turn still runs in this session: wait, then send ours
-                await state.turn.result()
-                state = await session.run(content)
+            with trace.stage("turn"):
+                state = await session.run(content, on_event=trace.on_event)
+                while isinstance(
+                    state, agents.Busy
+                ):  # a turn still runs in this session: wait, then send ours
+                    trace.step("busy_wait")
+                    await state.turn.result()
+                    state = await session.run(content, on_event=trace.on_event)
+        finally:
+            lock.release()
+        trace.finish(state)
         return session.id, state
 
     def is_summoned(self, message: discord.Message) -> bool:
@@ -343,7 +383,7 @@ class Debeloglav(discord.Client):
     # --- Background research -------------------------------------------------------------------
 
     def launch_research(self, request: Request, question: str) -> None:
-        if self.research_jobs >= MAX_RESEARCH_JOBS:
+        if self.research_jobs >= settings.get_int("max_research_jobs"):
             raise agents.ToolError(
                 "Too many research jobs are running. Ask the person to try again in a few minutes."
             )
@@ -354,16 +394,27 @@ class Debeloglav(discord.Client):
     async def research(self, request: Request, question: str) -> None:
         message = session = None
         started = time.monotonic()
+        trace = Trace()
         prompt: str | None = None
         error: str | None = None
         try:
             channel = await self.channel(request.channel_id)
             message = channel.get_partial_message(request.message_id)
             await react(message, RESEARCHING)
-            session = await self.research_agent.start_session()
+            research_agent = self.research_agent
+            trace.info.update(
+                model=getattr(research_agent, "model", None),
+                message_id=request.message_id,
+            )
+            with trace.stage("session_start"):
+                session = await research_agent.start_session()
+            trace.info["session_id"] = session.id
             prompt = f"{now_line()}\n\nResearch question from {request.user_name}:\n{question}"
-            async with asyncio.timeout(RESEARCH_TIMEOUT):
-                state = await session.run(prompt)
+            timeout = settings.get_int("research_timeout_minutes") * 60
+            with trace.stage("turn"):
+                async with asyncio.timeout(timeout):
+                    state = await session.run(prompt, on_event=trace.on_event)
+            trace.finish(state)
             text, files = await render(
                 parse(state), MAX_REPORT_CHARS
             )  # lists its own sources
@@ -398,11 +449,13 @@ class Debeloglav(discord.Client):
                 ok=error is None,
                 error=error,
                 duration_ms=duration_ms,
+                trace=trace.as_dict(),
             )
             return  # the channel is gone or unreachable: nowhere to post the report
 
-        text = await mentions.untag(getattr(message, "guild", None), text)
-        sent = await reply_chunks(message, text, files)
+        with trace.stage("send"):
+            text = await mentions.untag(getattr(message, "guild", None), text)
+            sent = await reply_chunks(message, text, files)
         record_activity(
             kind="research",
             scope=request.scope,
@@ -414,6 +467,7 @@ class Debeloglav(discord.Client):
             ok=error is None,
             error=error,
             duration_ms=duration_ms,
+            trace=trace.as_dict(),
         )
         # Replies to the report continue the conversation that asked for it.
         if request.session_id:
@@ -424,8 +478,10 @@ class Debeloglav(discord.Client):
     async def run_task(self, task: store.Task) -> None:
         """Run a scheduled task and record the run; a failure is recorded, then raised as before."""
         started = time.monotonic()
+        trace = Trace()
+        trace.info["task_id"] = task.id
         try:
-            prompt, reply = await self.run_scheduled_task(task)
+            prompt, reply = await self.run_scheduled_task(task, trace)
         except Exception as e:
             record_activity(
                 kind="task",
@@ -438,6 +494,7 @@ class Debeloglav(discord.Client):
                 ok=False,
                 error=f"{type(e).__name__}: {e}",
                 duration_ms=int((time.monotonic() - started) * 1000),
+                trace=trace.as_dict(),
             )
             raise
         record_activity(
@@ -451,9 +508,12 @@ class Debeloglav(discord.Client):
             ok=True,
             error=None,
             duration_ms=int((time.monotonic() - started) * 1000),
+            trace=trace.as_dict(),
         )
 
-    async def run_scheduled_task(self, task: store.Task) -> tuple[str, str]:
+    async def run_scheduled_task(
+        self, task: store.Task, trace: Trace | None = None
+    ) -> tuple[str, str]:
         """Run the task and post its answer; returns the prompt the model got and the text posted."""
         channel = await self.channel(task.channel_id)
         request = Request(
@@ -477,7 +537,9 @@ class Debeloglav(discord.Client):
         prompt.append(f"Task: {task.prompt}")
 
         content = [{"type": "text", "text": "\n\n".join(filter(None, prompt))}]
-        session_id, state = await self.run_turn(self.agent, None, request, content)
+        session_id, state = await self.run_turn(
+            self.agent, None, request, content, trace=trace
+        )
         sent_prompt = prompt_text(content)
         reply = parse(state, session_id)
         if reply is not None and reply.text.startswith(NO_REPLY):
@@ -513,13 +575,13 @@ class Debeloglav(discord.Client):
 
         A turn that raises before it is linked, or a crash mid-turn, leaves a journal behind.
         A directory goes only when the conversations table does not know its session, nobody
-        holds its lock, and it has not been touched for SESSION_IDLE_SECONDS — so running
+        holds its lock, and it has not been touched for session_idle() — so running
         turns, research jobs and fresh sessions are never deleted.
         """
         if not SESSIONS_DIR.is_dir():
             return
         known = store.session_ids()
-        cutoff = datetime.now(UTC) - timedelta(seconds=SESSION_IDLE_SECONDS)
+        cutoff = datetime.now(UTC) - session_idle()
         for entry in SESSIONS_DIR.iterdir():
             if not entry.is_dir() or entry.name in known:
                 continue
@@ -562,12 +624,13 @@ def scope_of(message: discord.Message) -> str:
 
 
 def now_line() -> str:
-    return f"Current local time: {datetime.now(TIMEZONE):%A %Y-%m-%d %H:%M} ({TIMEZONE.key})"
+    return f"Current local time: {datetime.now(timezone()):%A %Y-%m-%d %H:%M} ({timezone().key})"
 
 
 def thinking_emoji(guild: discord.Guild | None) -> discord.Emoji | str:
-    """The server's :THINKING_EMOTE: if it has one the bot can use, else 🤔."""
-    emoji = discord.utils.get(guild.emojis, name=THINKING_EMOTE) if guild else None
+    """The server's thinking_emote (a setting) if it has one the bot can use, else 🤔."""
+    name = settings.get("thinking_emote")
+    emoji = discord.utils.get(guild.emojis, name=name) if guild else None
     return emoji if emoji and emoji.available else THINKING
 
 
@@ -719,14 +782,12 @@ async def reply_chain(message: discord.Message, depth: int) -> list[discord.Mess
 async def recent_history(
     message: discord.Message, exclude: set[int]
 ) -> list[discord.Message]:
-    if CONTEXT_MESSAGES <= 0:
+    limit = settings.get_int("context_messages")
+    if limit <= 0:
         return []
     try:
         history = [
-            m
-            async for m in message.channel.history(
-                limit=CONTEXT_MESSAGES, before=message
-            )
+            m async for m in message.channel.history(limit=limit, before=message)
         ]
     except discord.HTTPException:
         return []
@@ -829,6 +890,18 @@ def prompt_text(content: list[dict[str, str]] | str) -> str:
     return text
 
 
+def content_stats(content: list[dict[str, str]] | None) -> dict[str, int]:
+    """How big the turn's input was: characters of text and the number of images."""
+    if not content:
+        return {}
+    return {
+        "prompt_chars": sum(
+            len(p.get("text", "")) for p in content if p.get("type") == "text"
+        ),
+        "images": sum(1 for p in content if p.get("type") == "image"),
+    }
+
+
 def record_activity(
     *,
     kind: str,
@@ -841,6 +914,7 @@ def record_activity(
     ok: bool = True,
     error: str | None = None,
     duration_ms: int | None = None,
+    trace: dict | None = None,
 ) -> None:
     """Record what the bot just did. A database error must never break answering, so it is only logged."""
     try:
@@ -855,6 +929,7 @@ def record_activity(
             ok=ok,
             error=error,
             duration_ms=duration_ms,
+            trace=trace,
         )
     except Exception:
         log.exception("Could not record the activity")

@@ -3,7 +3,7 @@
 import json
 import os
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS activity (
     reply TEXT,
     ok INTEGER NOT NULL,
     error TEXT,
-    duration_ms INTEGER
+    duration_ms INTEGER,
+    trace TEXT  -- JSON: the request's stages, steps and settings, see debeloglav.trace
 );
 CREATE INDEX IF NOT EXISTS activity_at ON activity (at);
 CREATE TABLE IF NOT EXISTS style_runs (
@@ -127,6 +128,7 @@ class Activity:
     ok: bool
     error: str | None
     duration_ms: int | None
+    trace: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -163,6 +165,11 @@ with _connect() as _db:
         row["name"] for row in _db.execute("PRAGMA table_info(style_runs)")
     }:
         _db.execute("ALTER TABLE style_runs ADD COLUMN skipped TEXT")
+    # Databases created before requests were traced.
+    if "trace" not in {
+        row["name"] for row in _db.execute("PRAGMA table_info(activity)")
+    }:
+        _db.execute("ALTER TABLE activity ADD COLUMN trace TEXT")
     # Databases from when style learning could be limited to a list of channels.
     if "channels" in {row["name"] for row in _db.execute("PRAGMA table_info(styles)")}:
         _db.execute("ALTER TABLE styles DROP COLUMN channels")
@@ -473,12 +480,13 @@ def log_activity(
     ok: bool = True,
     error: str | None = None,
     duration_ms: int | None = None,
+    trace: dict | None = None,
 ) -> None:
     """Record one thing the bot did, and drop the rows older than the newest ACTIVITY_LIMIT."""
     with _connect() as db:
         db.execute(
-            """INSERT INTO activity (at, kind, scope, channel_id, user_name, question, prompt, reply, ok, error, duration_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO activity (at, kind, scope, channel_id, user_name, question, prompt, reply, ok, error, duration_ms, trace)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _now(),
                 kind,
@@ -491,6 +499,7 @@ def log_activity(
                 ok,
                 error,
                 duration_ms,
+                json.dumps(trace, ensure_ascii=False, default=str) if trace else None,
             ),
         )
         db.execute(
@@ -514,6 +523,7 @@ def _activity(row: sqlite3.Row) -> Activity:
         ok=bool(row["ok"]),
         error=row["error"],
         duration_ms=row["duration_ms"],
+        trace=json.loads(row["trace"]) if row["trace"] else {},
     )
 
 
@@ -524,6 +534,13 @@ def recent_activity(limit: int = 100) -> list[Activity]:
             "SELECT * FROM activity ORDER BY at DESC, id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [_activity(row) for row in rows]
+
+
+def as_json(activity: "Activity | StyleRun") -> dict:
+    """A row as plain JSON values, for the dashboard's exports."""
+    data = asdict(activity)
+    data["at"] = activity.at.isoformat()
+    return data
 
 
 def activity(activity_id: int) -> Activity | None:

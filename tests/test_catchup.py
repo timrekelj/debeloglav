@@ -5,7 +5,7 @@ import pytest
 from mistralai import agents
 
 from debeloglav import blocked, catchup, context
-from debeloglav.context import TIMEZONE, Request
+from debeloglav.context import Request, timezone
 
 ASKER = 42
 
@@ -182,7 +182,7 @@ async def test_stops_at_the_askers_last_message_and_excludes_it():
     assert "newer than the asker" in result["messages"]
     assert "the asker's last message" not in result["messages"]
     assert result["since"] == (
-        f"the asker's last message at {last.astimezone(TIMEZONE):%Y-%m-%d %H:%M}"
+        f"the asker's last message at {last.astimezone(timezone()):%Y-%m-%d %H:%M}"
     )
 
 
@@ -324,13 +324,13 @@ async def test_an_open_poll_shows_until_when_in_local_time():
     bot, _ = setup([message(105, luka, poll=p)])
     result = await catchup.catch_up(bot, request(message_id=None))
     assert (
-        f"open until {expiry.astimezone(TIMEZONE):%Y-%m-%d %H:%M}" in result["messages"]
+        f"open until {expiry.astimezone(timezone()):%Y-%m-%d %H:%M}" in result["messages"]
     )
 
 
 async def test_today_shows_only_the_time():
     luka = person(7, "luka", "Luka")
-    now = datetime.now(TIMEZONE).replace(microsecond=0)
+    now = datetime.now(timezone()).replace(microsecond=0)
     bot, _ = setup(
         [
             message(105, luka, "today", created_at=now.astimezone(UTC)),

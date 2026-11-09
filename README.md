@@ -22,14 +22,14 @@ Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-st
 
 ### Conversations and memory
 
-- Reply to any of Debeloglav's messages (no tag needed) to continue that conversation: it remembers what was said. Each conversation is an Agents SDK session, journaled in `data/sessions/`, so it survives a restart and is kept for 6 idle hours.
+- Reply to any of Debeloglav's messages (no tag needed) to continue that conversation: it remembers what was said. Each conversation is an Agents SDK session, journaled in `data/sessions/`, so it survives a restart and is kept for 6 idle hours (`SESSION_IDLE_HOURS`).
 - `@Debeloglav zapomni si, da je Tim admin` → saved for the whole server and known in every conversation. `pozabi #3` deletes it.
 
 ### Learning how the server talks
 
-- Once a day it reads the server's recent messages (the last week on the first run, then everything since the last run) and updates a short **style guide**: tone, words and slang, nicknames, inside jokes, how much emoji, swearing and English, and typical phrases. Every reply uses it.
+- Once a day (`LEARN_EVERY_HOURS`) it reads the server's recent messages (the last week on the first run, then everything since the last run) and updates a short **style guide**: tone, words and slang, nicknames, inside jokes, how much emoji, swearing and English, and typical phrases. Every reply uses it.
 - It describes how people talk, not what they said, and leaves out personal data. It reads every text channel the bot can read, private ones included, except the channels blocked in the dashboard. Bot messages are skipped.
-- A run with fewer than 20 messages is skipped and doesn't count as learned, so the next run (3 hours later) still reads everything since the last guide. The dashboard's Learning page lists each run with the channels it left out and why.
+- A run with fewer than 20 messages (`STYLE_MIN_MESSAGES`) is skipped and doesn't count as learned, so the next run (3 hours later) still reads everything since the last guide. The dashboard's Learning page lists each run with the channels it left out and why.
 - `@Debeloglav kaj si se naučil o nas?` shows the guide.
 - Learning is turned on or off, or relearned, in the [admin dashboard](#admin-dashboard).
 
@@ -58,15 +58,19 @@ The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/styl
 - Watches: `@Debeloglav vsake 3 ure preveri, ali je izšel GTA 6 trailer, in mi povej` → it posts only when there's something new, and cancels itself when done.
 - `@Debeloglav katere naloge imamo?` / `prekliči nalogo #2`.
 
-Tasks are stored in SQLite (`data/debeloglav.db`) and survive restarts. Recurring tasks run at most every 15 minutes. Each server can have 25 tasks, each person 10. Only the person who created a task, or a server admin, can cancel it; the same goes for deleting memories.
+Tasks are stored in SQLite (`data/debeloglav.db`) and survive restarts. Recurring tasks run at most every 15 minutes. Each server can have 25 tasks, each person 10 (`MAX_TASKS`, `MAX_TASKS_PER_PERSON`). Only the person who created a task, or a server admin, can cancel it; the same goes for deleting memories.
 
 ### Admin dashboard
 
-The bot also serves a small password-protected **admin dashboard** (plain HTML, no JavaScript). Set `DASHBOARD_PASSWORD` in `.env` to enable it; it listens on `DASHBOARD_HOST` (default `127.0.0.1`) and `DASHBOARD_PORT` (default `8080`) and shows a login page at `/login` — enter just that password (no username) and you get a `HttpOnly` session cookie that lasts a week (or until you log out; a restart logs everyone out). With Docker Compose it is published on the host's loopback only, so open <http://localhost:8080>. Over SSH, forward it first: `ssh -L 8080:localhost:8080 host`, then open <http://localhost:8080> locally.
+The bot also serves a small password-protected **admin dashboard** (server-rendered HTML, no JavaScript; the Geist fonts are bundled in `debeloglav/static/` under the SIL Open Font License, so it loads nothing from other sites). Set `DASHBOARD_PASSWORD` in `.env` to enable it; it listens on `DASHBOARD_HOST` (default `127.0.0.1`) and `DASHBOARD_PORT` (default `8080`) and shows a login page at `/login` — enter just that password (no username) and you get a `HttpOnly` session cookie that lasts a week (or until you log out; a restart logs everyone out). With Docker Compose it is published on the host's loopback only, so open <http://localhost:8080>. Over SSH, forward it first: `ssh -L 8080:localhost:8080 host`, then open <http://localhost:8080> locally.
 
 Failed logins are rate-limited: after 5 wrong passwords from one client IP within 15 minutes that IP is locked out for 15 minutes (HTTP 429 with `Retry-After` — even the correct password is refused during the lockout), and more than 50 failures from all IPs together trigger a global 15-minute lockout that only the correct password gets through. Behind a reverse proxy every request arrives from the proxy's own address, so you must set `DASHBOARD_TRUSTED_PROXIES` to the proxy's IP as the dashboard sees it (with Docker Compose that is the Docker bridge gateway, e.g. `172.17.0.1`); without it the `X-Forwarded-For` header is ignored, because anyone can spoof it.
 
-It shows what the bot is doing — recent requests with their full prompts and replies, the prompts it actually gets, style-learning runs and guides, memories, blocked channels and active tasks, and the last errors — and it changes the settings: the model, the reasoning effort and the extra instructions, plus memories, blocked channels, style learning and task cancellation. It is the only place to change server settings; the bot has no admin slash commands. Blocked channels (a channel, or a whole category) are stored in SQLite, per server, and the bot stops reading them everywhere: messages, history search, catch-up and style learning. Code: `debeloglav/dashboard.py`.
+It shows what the bot is doing — recent requests with their full prompts and replies, the prompts it actually gets, style-learning runs and guides, memories, blocked channels and active tasks, and the last errors — and it changes the settings, memories, blocked channels, style learning and task cancellation.
+
+Every request is traced: how long each stage took (reading the context, the agent's turn, sending the reply), and every step of the turn with its time — each tool call and result, when the model started writing — plus the model and reasoning effort it ran with. A request's page shows this as a timeline, so a slow reply shows whether the time went to the model thinking, a tool, or Discord. The overview shows the median and p95 reply time, the average split per stage and the tools' timings. Export buttons download one request as JSON, the request list as JSON or CSV, the learning history, or everything at once (`/export/all.json`).
+
+Every optional setting from [Configuration](#configuration) can be changed on the Settings page, except the infrastructure ones (`DB_PATH` and the `DASHBOARD_*` variables) and the keys. The `.env` value is the default; a value saved in the dashboard is stored in SQLite and wins until you reset it, and it takes effect with the next message, no restart. It is the only place to change server settings; the bot has no admin slash commands. Blocked channels (a channel, or a whole category) are stored in SQLite, per server, and the bot stops reading them everywhere: messages, history search, catch-up and style learning. Code: `debeloglav/dashboard.py`.
 
 ## How it works
 
@@ -75,6 +79,8 @@ It shows what the bot is doing — recent requests with their full prompts and r
 - `debeloglav/agent.py` also has the memory, scheduling and research tools, and the research agent (`build_research_agent`) with its `researcher` subagent.
 - `debeloglav/media.py`: Voxtral transcription, and ffmpeg frame and audio extraction for videos.
 - `debeloglav/scheduler.py`: the loop that runs due tasks. `debeloglav/store.py`: SQLite for memories and tasks.
+- `debeloglav/settings.py`: every optional setting, its `.env` variable, default and limits; the dashboard's overrides live in SQLite.
+- `debeloglav/trace.py`: times each request's stages and records the steps of its turn from the Agents SDK's events, for the dashboard.
 - `debeloglav/context.py`: which Discord server, channel and person each running session acts for. Tools read it through their `ToolCallbackContext`; the model never sees it.
 - `debeloglav/bot.py`: the Discord side. Decides when it's summoned, gathers context (reply chain, recent messages, attachments), runs the agent, and replies.
 
@@ -109,20 +115,31 @@ Memories, tasks, the style guide and the conversations' sessions live in `data/`
 
 ## Configuration
 
+Only the two keys are required. The optional settings below are the defaults for the dashboard's Settings page, which can override each of them at runtime.
+
 | Variable           | Default           | Description                                             |
 | ------------------ | ----------------- | ------------------------------------------------------- |
 | `DISCORD_TOKEN`    | –                 | Discord bot token                                       |
 | `MISTRAL_API_KEY`  | –                 | Mistral API key                                         |
 | `MISTRAL_MODEL`    | `mistral-large-4` | Model that writes the answers                           |
+| `REASONING_EFFORT` | `low`             | How much the model thinks before normal replies: none, low, medium or high |
 | `TOOL_MODEL`       | `mistral-medium-latest` | Model for the hosted web search and image generation (about 3x faster than Large 4) |
-| `REASONING_EFFORT` | `low`             | How much the model thinks before normal replies: low, medium or high |
-| `CONTEXT_MESSAGES` | `10`              | How many earlier channel messages to include (0 = none) |
 | `TRANSCRIBE_MODEL` | `voxtral-mini-transcribe-3` | Model for voice messages and video sound   |
-| `VIDEO_FRAMES`     | `6`               | How many frames to sample from a video                  |
 | `OCR_MODEL`        | `mistral-ocr-latest` | Model that reads PDF, Word and PowerPoint files      |
-| `TIMEZONE`         | `Europe/Ljubljana` | Time zone for reminders and recurring tasks            |
-| `DB_PATH`          | `data/debeloglav.db` | SQLite file for memories and tasks                      |
+| `CONTEXT_MESSAGES` | `10`              | How many earlier channel messages to include (0 = none) |
+| `VIDEO_FRAMES`     | `6`               | How many frames to sample from a video                  |
+| `THINKING_EMOTE`   | `hmmmm`           | Server emote the bot reacts with while it thinks (🤔 when missing) |
+| `TIMEZONE`         | `Europe/Ljubljana` | Time zone for reminders, recurring tasks and the dashboard |
+| `SESSION_IDLE_HOURS` | `6`             | A reply after this long starts a new conversation       |
 | `MAX_RESEARCH_JOBS` | `3`              | How many research jobs can run at once                  |
+| `RESEARCH_TIMEOUT_MINUTES` | `20`      | A research job that runs longer is stopped              |
+| `MAX_MEMORIES`     | `100`             | Memories per server                                     |
+| `MAX_TASKS`        | `25`              | Scheduled tasks per server                              |
+| `MAX_TASKS_PER_PERSON` | `10`          | Scheduled tasks per person                              |
+| `LEARN_EVERY_HOURS` | `24`             | How often the style guide is refreshed                  |
+| `STYLE_WINDOW_DAYS` | `7`              | How far back a style run reads at most                  |
+| `STYLE_MIN_MESSAGES` | `20`            | A style run with fewer new messages is skipped          |
+| `DB_PATH`          | `data/debeloglav.db` | SQLite file for memories and tasks (`.env` only)     |
 | `DASHBOARD_PASSWORD` | –               | Password for the admin web dashboard the bot serves (empty = disabled). See [Admin dashboard](#admin-dashboard) |
 | `DASHBOARD_HOST`   | `127.0.0.1`       | Address the admin dashboard binds to (Compose sets `0.0.0.0` and publishes `127.0.0.1:8080:8080`) |
 | `DASHBOARD_PORT`   | `8080`            | Port the admin dashboard listens on |

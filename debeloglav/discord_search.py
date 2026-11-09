@@ -9,7 +9,7 @@ from discord.http import Route
 from mistralai import agents
 
 from . import blocked, polls
-from .context import TIMEZONE, Request
+from .context import Request, timezone
 from .mentions import who
 
 MAX_RESULTS = 25
@@ -97,7 +97,7 @@ async def search(
                 continue
             author_data = message["author"]
             member = guild.get_member(int(author_data["id"]))
-            sent = datetime.fromisoformat(message["timestamp"]).astimezone(TIMEZONE)
+            sent = datetime.fromisoformat(message["timestamp"]).astimezone(timezone())
             result = {
                 "author": who(member)
                 if member
@@ -238,4 +238,4 @@ def parse_date(value: str) -> datetime:
         raise agents.ToolError(
             f"{value!r} is not an ISO date, e.g. 2026-03-01 or 2026-03-01T18:00."
         ) from None
-    return when if when.tzinfo else when.replace(tzinfo=TIMEZONE)
+    return when if when.tzinfo else when.replace(tzinfo=timezone())

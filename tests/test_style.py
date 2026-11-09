@@ -50,12 +50,12 @@ async def test_learn_records_the_summarized_guide(monkeypatch):
 
 async def test_learn_records_a_skipped_run(monkeypatch):
     async def collect(guild, since):
-        return "Malo sporočil.", style.MIN_MESSAGES - 1, ["#tajno: blocked"]
+        return "Malo sporočil.", style.min_messages() - 1, ["#tajno: blocked"]
 
     monkeypatch.setattr(style, "collect", collect)
     assert not await style.learn(FakeGuild(2, "Testni"), "guild:learn2", store.Style())
     (run,) = store.style_runs("guild:learn2")
-    assert run.messages == style.MIN_MESSAGES - 1
+    assert run.messages == style.min_messages() - 1
     assert run.guide is None  # skipped: too few messages
     assert run.error is None
     assert run.skipped == ["#tajno: blocked"]

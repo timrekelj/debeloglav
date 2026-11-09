@@ -13,17 +13,14 @@ from mistralai import agents
 from mistralai.client import Mistral
 from mistralai.client import models as api_models
 
-from . import context, store
-from .context import TIMEZONE
+from . import context, settings, store
+from .context import timezone
 from .scheduler import MIN_CRON_INTERVAL, cron_interval, next_cron_run
 
-MODEL = os.environ.get("MISTRAL_MODEL", "mistral-large-4")
-# The hosted web search and image generation run on a faster model: about 3x quicker than Large 4.
-TOOL_MODEL = os.environ.get("TOOL_MODEL", "mistral-medium-latest")
-REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "low") or None
-MAX_MEMORIES = 100
-MAX_TASKS = 25  # per server
-MAX_TASKS_PER_PERSON = 10
+# The models and limits are settings (debeloglav.settings): the .env gives the defaults, the admin
+# dashboard can change them at runtime. The hosted web search and image generation run on the
+# faster tool_model: about 3x quicker than Large 4.
+REASONING_EFFORTS = settings.REASONING_EFFORTS
 
 client = Mistral(api_key=os.environ["MISTRAL_API_KEY"])
 
@@ -43,7 +40,7 @@ async def web_search(
 ) -> dict[str, object]:
     """Search the web for current or factual information. Returns a summary of what was found and its sources."""
     response = await client.beta.conversations.start_async(
-        model=TOOL_MODEL,
+        model=settings.get("tool_model"),
         inputs=query,
         tools=[{"type": "web_search"}],
         store=False,
@@ -148,7 +145,7 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
             await client.files.get_signed_url_async(file_id=uploaded.id, expiry=24)
         ).url
         response = await client.beta.conversations.start_async(
-            model=TOOL_MODEL,
+            model=settings.get("tool_model"),
             instructions=EDIT_INSTRUCTIONS,
             inputs=[
                 {
@@ -194,7 +191,7 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
 async def _describe_image(data: bytes) -> str:
     """A detailed English description of an image, for regenerating it with a change."""
     response = await client.chat.complete_async(
-        model=MODEL,
+        model=settings.get("model"),
         messages=[
             {
                 "role": "user",
@@ -306,7 +303,7 @@ async def _generate_images(
 ) -> list[bytes]:
     """Run the hosted image_generation tool and download what it made."""
     response = await client.beta.conversations.start_async(
-        model=TOOL_MODEL,
+        model=settings.get("tool_model"),
         instructions=instructions,
         inputs=prompt,
         tools=[{"type": "image_generation"}],
@@ -333,9 +330,10 @@ async def _generate_images(
 def remember(ctx: agents.ToolCallbackContext, /, fact: str) -> str:
     """Save a lasting fact about this server or its people, to know in every future conversation."""
     request = context.current(ctx)
-    if len(store.memories(request.scope)) >= MAX_MEMORIES:
+    limit = settings.get_int("max_memories")
+    if len(store.memories(request.scope)) >= limit:
         raise agents.ToolError(
-            f"Memory is full ({MAX_MEMORIES} facts). Ask which facts to forget first."
+            f"Memory is full ({limit} facts). Ask which facts to forget first."
         )
     memory_id = store.add_memory(
         request.scope, fact.strip(), request.user_name, request.user_id
@@ -444,7 +442,7 @@ def show_style_guide(ctx: agents.ToolCallbackContext, /) -> dict[str, object]:
     style = store.style(context.current(ctx).scope)
     return {
         "enabled": style.enabled,
-        "learned_at": f"{style.learned_at.astimezone(TIMEZONE):%Y-%m-%d %H:%M}"
+        "learned_at": f"{style.learned_at.astimezone(timezone()):%Y-%m-%d %H:%M}"
         if style.learned_at
         else None,
         "guide": style.guide or "(nothing learned yet)",
@@ -480,13 +478,15 @@ def schedule_task(
             "Give exactly one of run_at (one-off) or cron (recurring)."
         )
     active = store.tasks(request.scope)
-    if len(active) >= MAX_TASKS:
+    max_tasks = settings.get_int("max_tasks")
+    if len(active) >= max_tasks:
         raise agents.ToolError(
-            f"This server already has {MAX_TASKS} tasks. Cancel one first."
+            f"This server already has {max_tasks} tasks. Cancel one first."
         )
-    if sum(t.user_id == request.user_id for t in active) >= MAX_TASKS_PER_PERSON:
+    per_person = settings.get_int("max_tasks_per_person")
+    if sum(t.user_id == request.user_id for t in active) >= per_person:
         raise agents.ToolError(
-            f"You already have {MAX_TASKS_PER_PERSON} tasks. Cancel one of yours first."
+            f"You already have {per_person} tasks. Cancel one of yours first."
         )
 
     now = datetime.now(UTC)
@@ -498,7 +498,7 @@ def schedule_task(
                 f"{run_at!r} is not an ISO date and time, e.g. 2026-11-06T18:30."
             ) from None
         if when.tzinfo is None:
-            when = when.replace(tzinfo=TIMEZONE)
+            when = when.replace(tzinfo=timezone())
         if when < now - timedelta(minutes=1):
             raise agents.ToolError("That time is in the past.")
         if when > now + timedelta(days=366):
@@ -526,8 +526,8 @@ def schedule_task(
         watch=watch,
         mention=mention_creator,
     )
-    local = next_run.astimezone(TIMEZONE)
-    return f"Scheduled as task #{task_id}. Next run: {local:%A %Y-%m-%d %H:%M} ({TIMEZONE.key})."
+    local = next_run.astimezone(timezone())
+    return f"Scheduled as task #{task_id}. Next run: {local:%A %Y-%m-%d %H:%M} ({timezone().key})."
 
 
 @agents.tool(model_access="direct")
@@ -538,7 +538,7 @@ def list_tasks(ctx: agents.ToolCallbackContext, /) -> list[dict[str, object]]:
             "id": task.id,
             "prompt": task.prompt,
             "schedule": task.cron or "once",
-            "next_run": f"{task.next_run.astimezone(TIMEZONE):%Y-%m-%d %H:%M}",
+            "next_run": f"{task.next_run.astimezone(timezone()):%Y-%m-%d %H:%M}",
             "watch": task.watch,
             "created_by": task.user_name,
         }
@@ -637,74 +637,32 @@ Scheduled runs:
 
 
 # --- Admin settings --------------------------------------------------------------------------------
-# Editable at runtime and stored in SQLite (store.settings), so an admin dashboard can change the
-# model, the reasoning effort and extra instructions without a restart. A missing row falls back to
-# the default read from the environment at import. New turns pick a change up (bot.Debeloglav
+# The settings themselves live in debeloglav.settings. New turns pick a change up (bot.Debeloglav
 # .apply_settings rebuilds the agent); a session that is already running keeps the settings it
 # started with, because the Agents SDK fixes a session's agent config when the session starts.
 
-REASONING_EFFORTS = ("none", "low", "medium", "high")
 EXTRA_INSTRUCTIONS_HEADING = "Extra instructions from the admins:"
 
-
-def default_settings() -> dict[str, str]:
-    """The editable settings' defaults: the environment at import, extra instructions empty."""
-    return {
-        "reasoning_effort": REASONING_EFFORT or "none",
-        "model": MODEL,
-        "extra_instructions": "",
-    }
-
-
-def current_settings() -> dict[str, str]:
-    """The effective settings: the stored value when one is saved, else the default."""
-    stored = store.all_settings()
-    return {
-        key: stored.get(key) or default for key, default in default_settings().items()
-    }
-
-
-def settings_version() -> str:
-    """A fingerprint of the effective settings, so the bot can tell a change without rebuilding."""
-    return json.dumps(current_settings(), sort_keys=True)
-
-
-def update_setting(key: str, value: str | None) -> dict[str, str]:
-    """Validate and save one setting (None resets it to the default); return the effective settings.
-
-    Raises ValueError on an unknown key or an invalid value, and saves nothing then.
-    """
-    defaults = default_settings()
-    if key not in defaults:
-        raise ValueError(
-            f"Unknown setting {key!r}; the editable settings are: {', '.join(sorted(defaults))}."
-        )
-    if value is not None:
-        value = value.strip()
-        if key == "reasoning_effort" and value not in REASONING_EFFORTS:
-            raise ValueError(
-                f"reasoning_effort must be one of: {', '.join(REASONING_EFFORTS)}; got {value!r}."
-            )
-        if key == "model" and not value:
-            raise ValueError("model must not be empty.")
-    store.set_setting(key, value)
-    return current_settings()
+default_settings = settings.defaults
+current_settings = settings.current
+settings_version = settings.version
+update_setting = settings.update
 
 
 def effective_instructions() -> str:
     """The full system prompt the agent gets: INSTRUCTIONS plus the admins' extra instructions."""
-    extra = current_settings()["extra_instructions"]
+    extra = settings.get("extra_instructions")
     if not extra:
         return INSTRUCTIONS
     return f"{INSTRUCTIONS}\n\n{EXTRA_INSTRUCTIONS_HEADING}\n{extra}"
 
 
 def build_agent() -> agents.Agent:
-    settings = current_settings()
-    reasoning_effort = settings["reasoning_effort"]
+    values = settings.current()
+    reasoning_effort = values["reasoning_effort"]
     return agents.Agent(
         name="debeloglav",
-        model=settings["model"],
+        model=values["model"],
         instructions=effective_instructions(),
         tools=[
             web_search,
@@ -744,7 +702,7 @@ Report your findings as concise facts with numbers and dates, and list the URL o
 def build_research_agent() -> agents.Agent:
     return agents.Agent(
         name="debeloglav-research",
-        model=MODEL,
+        model=settings.get("model"),
         instructions=RESEARCH_INSTRUCTIONS,
         tools=[web_search],
         # Subagents need programmatic tool calling: the lead starts them from code it writes.

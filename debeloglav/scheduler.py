@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from croniter import croniter
 
 from . import store
-from .context import TIMEZONE
+from .context import timezone
 
 log = logging.getLogger("debeloglav.scheduler")
 
@@ -19,7 +19,7 @@ POLL_SECONDS = 30
 
 def next_cron_run(cron: str, after: datetime) -> datetime:
     """The next time a local-time cron expression fires after `after`, in UTC."""
-    return croniter(cron, after.astimezone(TIMEZONE)).get_next(datetime).astimezone(UTC)
+    return croniter(cron, after.astimezone(timezone())).get_next(datetime).astimezone(UTC)
 
 
 def cron_interval(cron: str) -> timedelta:
@@ -28,7 +28,7 @@ def cron_interval(cron: str) -> timedelta:
         raise ValueError(
             f"{cron!r} is not a 5-field cron expression, e.g. '0 8 * * *'."
         )
-    runs = croniter(cron, datetime.now(TIMEZONE))
+    runs = croniter(cron, datetime.now(timezone()))
     times = [runs.get_next(datetime) for _ in range(6)]
     return min(b - a for a, b in itertools.pairwise(times))
 

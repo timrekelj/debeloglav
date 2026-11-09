@@ -6,7 +6,7 @@ import discord
 from mistralai import agents
 
 from . import blocked, discord_search, polls
-from .context import TIMEZONE, Request
+from .context import Request, timezone
 from .mentions import who
 
 MAX_MESSAGES = 300  # how far back to read
@@ -78,7 +78,7 @@ async def catch_up(
     return {
         "channel": f"#{place.name}",
         "since": (
-            f"the asker's last message at {since.astimezone(TIMEZONE):%Y-%m-%d %H:%M}"
+            f"the asker's last message at {since.astimezone(timezone()):%Y-%m-%d %H:%M}"
             if since
             else f"the last {MAX_MESSAGES} messages (you haven't written here recently)"
         ),
@@ -90,10 +90,10 @@ async def catch_up(
 
 def line(message: discord.Message, i: int, ids: dict[int, int]) -> str:
     """One transcript line: short id, local time, author, content and markers."""
-    sent = message.created_at.astimezone(TIMEZONE)
+    sent = message.created_at.astimezone(timezone())
     stamp = (
         f"{sent:%H:%M}"
-        if sent.date() == datetime.now(TIMEZONE).date()
+        if sent.date() == datetime.now(timezone()).date()
         else f"{sent:%Y-%m-%d %H:%M}"
     )
     parts = [message.clean_content[:MAX_CHARS]]

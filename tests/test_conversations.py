@@ -133,7 +133,7 @@ async def test_prune_orphan_journals_deletes_only_old_unknown_dirs():
         directory.mkdir(exist_ok=True)
         (directory / "session.json").write_text("{}")
     client.conversations.link("old-known", 801)  # the table knows this session
-    old = time.time() - bot.SESSION_IDLE_SECONDS - 60
+    old = time.time() - bot.session_idle().total_seconds() - 60
     for directory in (old_unknown, old_known, locked_unknown):
         os.utime(directory, (old, old))  # as if last touched over 6 hours ago
     lock = client.conversations.lock("locked-unknown")

@@ -7,16 +7,12 @@ from datetime import UTC, datetime, timedelta
 import discord
 from mistralai.client import models as api_models
 
-from . import blocked, store
-from .agent import MODEL, client
+from . import blocked, settings, store
+from .agent import client
 from .mentions import who
 
 log = logging.getLogger("debeloglav.style")
 
-LEARN_EVERY = timedelta(hours=24)
-FIRST_WINDOW = timedelta(
-    days=7
-)  # how far back the first run reads; later runs read since the last one
 CHECK_SECONDS = 15 * 60
 RETRY_AFTER = timedelta(
     hours=3
@@ -24,7 +20,20 @@ RETRY_AFTER = timedelta(
 MAX_PER_CHANNEL = 200
 MAX_MESSAGES = 1500
 MAX_CHARS = 300
-MIN_MESSAGES = 20
+
+
+def learn_every() -> timedelta:
+    return timedelta(hours=settings.get_int("learn_every_hours"))
+
+
+def first_window() -> timedelta:
+    """How far back the first run reads; later runs read since the last one."""
+    return timedelta(days=settings.get_int("style_window_days"))
+
+
+def min_messages() -> int:
+    return settings.get_int("style_min_messages")
+
 
 SUMMARIZER = """You maintain a style guide that describes how the members of a Slovenian Discord server talk, so that a bot can talk like them.
 You get the current guide (it may be empty) and the server's messages since the last update. Return the updated guide.
@@ -46,7 +55,7 @@ Rules:
 
 
 async def run_forever(bot: discord.Client) -> None:
-    """Every CHECK_SECONDS, refresh the guide of each server whose guide is older than LEARN_EVERY."""
+    """Every CHECK_SECONDS, refresh the guide of each server whose guide is older than learn_every()."""
     await bot.wait_until_ready()
     missed_at: dict[str, datetime] = {}  # when the last run failed or was skipped
     while True:
@@ -56,7 +65,7 @@ async def run_forever(bot: discord.Client) -> None:
             now = datetime.now(UTC)
             if not style.enabled:
                 continue
-            if style.learned_at and now - style.learned_at < LEARN_EVERY:
+            if style.learned_at and now - style.learned_at < learn_every():
                 continue
             if scope in missed_at and now - missed_at[scope] < RETRY_AFTER:
                 continue
@@ -76,12 +85,13 @@ async def learn(guild: discord.Guild, scope: str, style: store.Style) -> bool:
     """Refresh the guide from the messages since the last successful run. Returns whether it learned.
 
     A skipped run leaves learned_at alone, so the next run still reads everything since the last
-    guide (at most FIRST_WINDOW back) instead of only what was written after the skip.
+    guide (at most first_window() back) instead of only what was written after the skip.
     """
     now = datetime.now(UTC)
-    since = max(style.learned_at or now - FIRST_WINDOW, now - FIRST_WINDOW)
+    window = first_window()
+    since = max(style.learned_at or now - window, now - window)
     transcript, count, skipped = await collect(guild, since)
-    if count < MIN_MESSAGES:
+    if count < min_messages():
         log.info(
             "Skipped learning the style of %s: only %d messages since the last run",
             guild.name,
@@ -155,7 +165,7 @@ def readable(channel: discord.TextChannel, who: discord.Member | discord.Role) -
 
 async def summarize(previous: str | None, transcript: str) -> str:
     response = await client.chat.complete_async(
-        model=MODEL,
+        model=settings.get("model"),
         temperature=0.3,
         messages=[
             {"role": "system", "content": SUMMARIZER},

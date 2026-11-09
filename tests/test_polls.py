@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import discord
 
 from debeloglav import polls
-from debeloglav.context import TIMEZONE
+from debeloglav.context import timezone
 
 
 def answer(text, count=0, emoji=None, id=1):
@@ -54,7 +54,7 @@ def test_describe_an_open_poll_with_expiry_in_local_time():
     p = poll(answers=[answer("A", 1, id=1)], expires_at=expiry)
     assert (
         polls.describe(p)
-        == f'[poll: "Kam gremo na pico?" — A: 1 votes · open until {expiry.astimezone(TIMEZONE):%Y-%m-%d %H:%M}]'
+        == f'[poll: "Kam gremo na pico?" — A: 1 votes · open until {expiry.astimezone(timezone()):%Y-%m-%d %H:%M}]'
     )
 
 

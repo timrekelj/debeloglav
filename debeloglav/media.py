@@ -2,15 +2,12 @@
 
 import asyncio
 import base64
-import os
 import tempfile
 from pathlib import Path
 
+from . import settings
 from .agent import client
 
-TRANSCRIBE_MODEL = os.environ.get("TRANSCRIBE_MODEL", "voxtral-mini-transcribe-3")
-OCR_MODEL = os.environ.get("OCR_MODEL", "mistral-ocr-latest")
-VIDEO_FRAMES = int(os.environ.get("VIDEO_FRAMES", "6"))
 IMAGE_SIDE = 1568  # longest side sent to the model; larger images only cost time
 
 # Read with Mistral OCR, which returns each page as markdown, tables included.
@@ -29,7 +26,7 @@ TEXT_SUFFIXES = {
 
 async def transcribe(data: bytes, file_name: str) -> str:
     response = await client.audio.transcriptions.complete_async(
-        model=TRANSCRIBE_MODEL,
+        model=settings.get("transcribe_model"),
         file={"file_name": file_name, "content": data},
     )
     return response.text.strip()
@@ -46,7 +43,7 @@ async def document_text(data: bytes, file_name: str) -> str:
     if mime is None:
         return data.decode("utf-8", errors="replace").strip()
     response = await client.ocr.process_async(
-        model=OCR_MODEL,
+        model=settings.get("ocr_model"),
         document={
             "type": "document_url",
             "document_url": f"data:{mime};base64,{base64.b64encode(data).decode()}",
@@ -86,14 +83,15 @@ async def video_frames_and_audio(
         video.write_bytes(data)
 
         duration = await _duration(video)
-        fps = VIDEO_FRAMES / duration if duration > 0 else 1
+        count = settings.get_int("video_frames")
+        fps = count / duration if duration > 0 else 1
         await _ffmpeg(
             "-i",
             str(video),
             "-vf",
             f"fps={fps:.4f},scale='min(1024,iw)':-2",
             "-frames:v",
-            str(VIDEO_FRAMES),
+            str(count),
             "-q:v",
             "4",
             str(Path(tmp) / "frame_%02d.jpg"),

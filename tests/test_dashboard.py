@@ -888,3 +888,142 @@ async def test_post_redirect_stays_on_the_dashboard(logged_in):
     )
     assert response.status == 303
     assert response.headers["Location"] == "/"  # not to another site
+
+
+# --- Fonts, traces and exports ----------------------------------------------------------------------
+
+
+async def test_fonts_are_served_without_a_session_and_cached(client):
+    response = await client.get("/static/Geist-Variable.woff2")
+    assert response.status == 200
+    assert response.content_type == "font/woff2"
+    assert response.headers["Cache-Control"] == "public, max-age=604800"
+    assert "font-src 'self'" in response.headers["Content-Security-Policy"]
+    assert (await response.read())[:4] == b"wOF2"
+    for bad in ("/static/..%2Fstore.py", "/static/missing.woff2", "/static/settings.py"):
+        assert (await client.get(bad)).status == 404, bad
+
+
+def traced_request() -> int:
+    store.log_activity(
+        kind="reply",
+        scope="guild:1",
+        channel_id=10,
+        user_name="Tim (@tim)",
+        question="Kako si?",
+        reply="Dobro.",
+        duration_ms=22_268,
+        trace={
+            "model": "mistral-large-4",
+            "reasoning_effort": "low",
+            "stages": {"context": 300, "turn": 21_500, "send": 400},
+            "steps": [
+                {"at_ms": 400, "kind": "turn_started"},
+                {
+                    "at_ms": 6_000,
+                    "kind": "tool_call",
+                    "name": "python.show_style_guide",
+                },
+                {
+                    "at_ms": 6_010,
+                    "kind": "tool_result",
+                    "name": "python.show_style_guide",
+                },
+                {"at_ms": 21_800, "kind": "model_message", "detail": "6 chars: Dobro."},
+            ],
+            "tool_calls": ["python.show_style_guide"],
+        },
+    )
+    return store.recent_activity(1)[0].id
+
+
+async def test_request_detail_shows_the_timeline(logged_in):
+    activity_id = traced_request()
+    text = await (await logged_in.get(f"/requests/{activity_id}")).text()
+    for needle in (
+        "Agent turn",
+        "show_style_guide",
+        "model thinking",
+        "mistral-large-4",
+        "22.3 s",
+    ):
+        assert needle in text, needle
+    text = await (await logged_in.get("/requests")).text()
+    assert "show_style_guide" in text  # the tools column
+    text = await (await logged_in.get("/")).text()
+    assert "Where reply time goes" in text and "show_style_guide" in text
+
+
+async def test_exports(logged_in):
+    seed()
+    activity_id = traced_request()
+    response = await logged_in.get(f"/requests/{activity_id}/json")
+    assert response.status == 200
+    assert "attachment" in response.headers["Content-Disposition"]
+    data = await response.json(content_type=None)
+    assert data["id"] == activity_id and data["trace"]["stages"]["turn"] == 21_500
+    assert data["guild"] == "Testni" and data["channel"] == "#general"
+
+    data = await (await logged_in.get("/export/requests.json?errors=1")).json(
+        content_type=None
+    )
+    assert [a["question"] for a in data] == ["Raziskava"]
+
+    text = await (await logged_in.get("/export/requests.csv")).text()
+    header, *rows = text.strip().splitlines()
+    assert header.startswith("id,at,kind") and "turn_ms" in header
+    assert len(rows) == 3 and any("show_style_guide" in row for row in rows)
+
+    data = await (await logged_in.get("/export/learning.json")).json(content_type=None)
+    assert data["styles"][0]["guide"] == "## Ton\nPrijazni." and len(data["runs"]) == 2
+
+    data = await (await logged_in.get("/export/all.json")).json(content_type=None)
+    assert {
+        "settings",
+        "requests",
+        "runs",
+        "memories",
+        "tasks",
+        "blocked_channels",
+    } <= set(data)
+    assert data["settings"]["overrides"] == {"extra_instructions": "Bodi zabaven."}
+    assert (
+        "MISTRAL_API_KEY" not in str(data)
+        and "test" not in data["settings"]["current"].values()
+    )
+
+
+async def test_exports_need_a_session(client):
+    for path in ("/export/all.json", "/export/requests.csv", "/requests/1/json"):
+        response = await client.get(path, allow_redirects=False)
+        assert response.status == 303, path
+
+
+async def test_every_setting_is_on_the_settings_page_and_validated(logged_in):
+    text = await (await logged_in.get("/settings")).text()
+    for key in (
+        "tool_model",
+        "context_messages",
+        "timezone",
+        "learn_every_hours",
+        "max_tasks",
+    ):
+        assert f"<code>{key}</code>" in text, key
+    response = await logged_in.post(
+        "/settings",
+        data={"key": "context_messages", "value": "500"},
+        allow_redirects=False,
+    )
+    assert "error=" in response.headers["Location"]
+    assert store.get_setting("context_messages") is None
+    response = await logged_in.post(
+        "/settings",
+        data={
+            "key": "context_messages",
+            "value": "4",
+            "next": "/settings#context_messages",
+        },
+        allow_redirects=False,
+    )
+    assert response.headers["Location"] == "/settings#context_messages"
+    assert store.get_setting("context_messages") == "4"

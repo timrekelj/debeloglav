@@ -4,14 +4,18 @@ The bot registers a Request before each turn. A tool reads it through its ToolCa
 session id; the model never sees it.
 """
 
-import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
 from mistralai import agents
 
-TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Ljubljana"))
+from . import settings
+
+
+def timezone() -> ZoneInfo:
+    """The bot's local time zone (the timezone setting), read each time so a change applies at once."""
+    return ZoneInfo(settings.get("timezone"))
 
 
 @dataclass

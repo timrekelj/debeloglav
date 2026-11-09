@@ -1,12 +1,10 @@
 """The admin-editable settings in SQLite: storage, validation, defaults, instructions, and the bot
 picking up a change on the next turn (with fakes, no network)."""
 
-import importlib
-
 import pytest
 from mistralai import agents
 
-from debeloglav import agent, bot, context, store
+from debeloglav import agent, bot, context, settings, store
 
 
 @pytest.fixture(autouse=True)
@@ -50,27 +48,51 @@ def test_settings_are_really_in_sqlite():
 # --- Validation and defaults ------------------------------------------------------------------------
 
 
-def test_defaults_come_from_the_environment_at_import():
-    assert agent.current_settings() == {
-        "reasoning_effort": agent.REASONING_EFFORT or "none",
-        "model": agent.MODEL,
-        "extra_instructions": "",
-    }
+def test_without_overrides_the_settings_are_the_defaults():
+    assert agent.current_settings() == settings.defaults()
+    assert set(settings.defaults()) == set(settings.BY_KEY)
+    assert settings.get("extra_instructions") == ""
 
 
 def test_defaults_read_the_environment(monkeypatch):
+    for key in ("MISTRAL_MODEL", "REASONING_EFFORT", "VIDEO_FRAMES", "TIMEZONE"):
+        monkeypatch.delenv(key, raising=False)
+    assert settings.get("model") == "mistral-large-4"  # the built-in defaults
+    assert settings.get("reasoning_effort") == "low"
     monkeypatch.setenv("MISTRAL_MODEL", "env-model")
     monkeypatch.setenv("REASONING_EFFORT", "high")
-    importlib.reload(agent)  # the module reads the environment at import
-    try:
-        assert agent.current_settings() == {
-            "reasoning_effort": "high",
-            "model": "env-model",
-            "extra_instructions": "",
-        }
-    finally:
-        monkeypatch.undo()
-        importlib.reload(agent)
+    monkeypatch.setenv("VIDEO_FRAMES", "9")
+    monkeypatch.setenv("TIMEZONE", "Europe/Berlin")
+    assert settings.get("model") == "env-model"
+    assert settings.get("reasoning_effort") == "high"
+    assert settings.get_int("video_frames") == 9
+    assert context.timezone().key == "Europe/Berlin"
+    monkeypatch.setenv("REASONING_EFFORT", "")  # set but empty: no reasoning
+    assert settings.get("reasoning_effort") == "none"
+    monkeypatch.setenv("VIDEO_FRAMES", "lots")  # invalid: the built-in default
+    assert settings.get_int("video_frames") == 6
+
+
+def test_a_saved_value_wins_over_the_environment(monkeypatch):
+    monkeypatch.setenv("CONTEXT_MESSAGES", "4")
+    assert settings.get_int("context_messages") == 4
+    settings.update("context_messages", "12")
+    assert settings.get_int("context_messages") == 12
+    assert settings.overrides() == {"context_messages": "12"}
+    settings.update("context_messages", None)
+    assert settings.get_int("context_messages") == 4
+
+
+def test_numbers_and_time_zones_are_validated():
+    for bad in ("abc", "-1", "51", "", "3.5"):
+        with pytest.raises(ValueError):
+            settings.update("context_messages", bad)
+    assert settings.update("context_messages", " 0 ")["context_messages"] == "0"
+    with pytest.raises(ValueError):
+        settings.update("timezone", "Mars/Olympus")
+    settings.update("timezone", "America/New_York")
+    assert context.timezone().key == "America/New_York"
+    settings.update("timezone", None)
 
 
 def test_update_setting_accepts_only_valid_values():
@@ -78,8 +100,8 @@ def test_update_setting_accepts_only_valid_values():
         with pytest.raises(ValueError):
             agent.update_setting("reasoning_effort", bad)
     for good in agent.REASONING_EFFORTS:
-        settings = agent.update_setting("reasoning_effort", good)
-        assert settings["reasoning_effort"] == good
+        values = agent.update_setting("reasoning_effort", good)
+        assert values["reasoning_effort"] == good
     with pytest.raises(ValueError):
         agent.update_setting("model", "   ")
     with pytest.raises(ValueError):
@@ -91,18 +113,18 @@ def test_update_setting_accepts_only_valid_values():
 def test_update_setting_none_resets_to_the_default():
     agent.update_setting("reasoning_effort", "high")
     assert store.get_setting("reasoning_effort") == "high"
-    settings = agent.update_setting("reasoning_effort", None)
+    values = agent.update_setting("reasoning_effort", None)
     assert store.get_setting("reasoning_effort") is None
-    assert settings["reasoning_effort"] == agent.REASONING_EFFORT or "none"
+    assert values["reasoning_effort"] == settings.defaults()["reasoning_effort"]
 
 
 def test_current_settings_ignore_unknown_saved_keys():
     store.set_setting("bogus", "x")
-    assert set(agent.current_settings()) == {
-        "reasoning_effort",
-        "model",
-        "extra_instructions",
-    }
+    store.set_setting("video_frames", "999")  # saved under older limits
+    assert set(agent.current_settings()) == set(settings.BY_KEY)
+    assert (
+        agent.current_settings()["video_frames"] == settings.defaults()["video_frames"]
+    )
 
 
 def test_settings_version_changes_only_with_the_settings():
@@ -153,7 +175,7 @@ class FakeSession:
         self.id = session_id
         self.ran: list[object] = []
 
-    async def run(self, content):
+    async def run(self, content, on_event=None):
         self.ran.append(content)
         return agents.Completed(
             session_id=self.id, turn_id="t1", cursor="c1", text="ok", output=None
