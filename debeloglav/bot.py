@@ -30,6 +30,7 @@ from . import (
     polls,
     scheduler,
     settings,
+    status,
     store,
     style,
 )
@@ -138,6 +139,7 @@ class Debeloglav(discord.Client):
         context.launch_research = self.launch_research
         context.search_messages = functools.partial(discord_search.search, self)
         context.catch_up = functools.partial(catchup.catch_up, self)
+        context.request_status = functools.partial(status.request_status, self)
         self.spawn(scheduler.run_forever(self.run_task))
         self.spawn(self.prune_sessions())
         self.spawn(style.run_forever(self))
@@ -465,10 +467,18 @@ class Debeloglav(discord.Client):
                 session = await research_agent.start_session()
             trace.info["session_id"] = session.id
             prompt = f"{now_line()}\n\nResearch question from {request.user_name}:\n{question}"
-            timeout = settings.get_int("research_timeout_minutes") * 60
+            minutes = settings.get_int("research_timeout_minutes")
             with trace.stage("turn"):
-                async with asyncio.timeout(timeout):
-                    state = await session.run(prompt, on_event=trace.on_event)
+                try:
+                    async with (
+                        trace.following_subagents(session),
+                        asyncio.timeout(minutes * 60),
+                    ):
+                        state = await session.run(prompt, on_event=trace.on_event)
+                except TimeoutError:
+                    raise TimeoutError(
+                        f"the research ran longer than the {minutes} min limit"
+                    ) from None
             trace.finish(state)
             text, files = await render(
                 parse(state), MAX_REPORT_CHARS

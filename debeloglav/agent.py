@@ -578,6 +578,35 @@ async def start_research(ctx: agents.ToolCallbackContext, /, question: str) -> s
     return "Research started. The report will be posted as a reply to the request when it is done."
 
 
+# --- Request status ----------------------------------------------------------------------------
+
+
+@agents.tool(model_access="direct")
+async def request_status(
+    ctx: agents.ToolCallbackContext,
+    /,
+    limit: int = 5,
+    kind: str | None = None,
+    failed_only: bool = False,
+    asked_by: str | None = None,
+) -> dict[str, object]:
+    """The status of your recent requests in this server, newest first: what was asked, whether it
+    worked or failed, how long it took, the reply or the error, and for a failure what went wrong
+    (turn error, failed tool calls, researchers still running at a timeout).
+
+    limit: how many requests, 1 to 20.
+    kind: only "reply" (answers to messages), "research" (background research) or "task" (scheduled runs).
+    failed_only: only the requests that failed.
+    asked_by: only requests from this person: their nickname or @username.
+    """
+    request = context.current(ctx)
+    if context.request_status is None:
+        raise agents.ToolError("Request status is not available.")
+    return await context.request_status(
+        request, limit=limit, kind=kind, failed_only=failed_only, asked_by=asked_by
+    )
+
+
 INSTRUCTIONS = f"""You are Debeloglav, a witty, sharp and helpful assistant living in a Discord server, like Grok on X.
 People summon you by tagging you in a message, by replying to your messages, or by writing in a thread you opened for an answer.
 
@@ -631,6 +660,10 @@ Background research:
 - When someone asks for deep or thorough research, a detailed comparison, or a question that needs many searches, call start_research and answer only that you are on it and will reply when done. Do not research it yourself in this turn.
 - Answer normal questions directly.
 
+Your own requests:
+- When someone asks what happened to a request, why research failed or never came, whether something worked, or what your recent errors were, call request_status (kind="research" for research, failed_only for errors).
+- Explain it plainly: what was asked, when, whether it worked, how long it took, and for a failure the error and its likely cause (e.g. a timeout with researchers still running). Keep error names and messages exact, in `code`.
+
 Scheduled runs:
 - A message that starts with "[Scheduled task #N]" is a task you scheduled earlier. Do what it says and write the message to post.
 - For a watch, if there is nothing new or relevant since your last report, answer exactly {NO_REPLY}. When a watch has done its job and is no longer needed, call cancel_task for it."""
@@ -674,6 +707,7 @@ def build_agent() -> agents.Agent:
             list_tasks,
             cancel_task,
             start_research,
+            request_status,
             search_discord_messages,
             catch_up,
             show_style_guide,

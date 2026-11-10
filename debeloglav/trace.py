@@ -4,20 +4,24 @@ A Trace times the bot's own stages (reading the context, the agent's turn, sendi
 records every step of the turn from the Agents SDK's events: each model message, tool call and
 tool result, with the milliseconds since the request started. It is stored with the activity row
 as JSON, and the dashboard shows it as a timeline and exports it.
+
+The steps of a subagent (a research job's researchers) carry an "agent" label, e.g. "researcher 2".
 """
 
+import asyncio
 import json
 import logging
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from mistralai import agents
 
 log = logging.getLogger("debeloglav.trace")
 
-MAX_STEPS = 200
+MAX_STEPS = 400
 MAX_DETAIL = 600
+SUBAGENT_POLL_SECONDS = 2.0
 
 
 def clip(text: object, limit: int = MAX_DETAIL) -> str:
@@ -55,10 +59,13 @@ class Trace:
         name: str | None = None,
         detail: object = None,
         error: bool = False,
+        agent: str | None = None,
     ) -> None:
         if len(self.steps) >= MAX_STEPS:
             return
         step: dict[str, Any] = {"at_ms": self.ms(), "kind": kind}
+        if agent:
+            step["agent"] = agent
         if name:
             step["name"] = name
         if detail not in (None, ""):
@@ -67,30 +74,42 @@ class Trace:
             step["error"] = True
         self.steps.append(step)
 
-    def on_event(self, event: object) -> None:
+    def on_event(self, event: object, agent: str | None = None) -> None:
         """The Agents SDK's event handler for session.run(on_event=...). Never raises."""
         try:
-            self._event(event)
+            self._event(event, agent)
         except Exception:
             log.exception("Could not trace the event %r", event)
 
-    def _event(self, event: object) -> None:
+    def _event(self, event: object, agent: str | None) -> None:
         if isinstance(event, agents.TurnStarted):
-            self.step("turn_started")
+            self.step("turn_started", agent=agent)
         elif isinstance(event, agents.EntryAdded):
             entry = event.entry
             if isinstance(entry, agents.MessageEntry) and entry.role == "assistant":
-                self.step("model_writing")  # the model's first output token
+                self.step(
+                    "model_writing", agent=agent
+                )  # the model's first output token
         elif isinstance(event, agents.EntryCompleted):
-            self._entry(event.entry)
+            self._entry(event.entry, agent)
         elif isinstance(event, agents.Notice):
-            self.step("notice", name=str(event.level), detail=event.message)
+            self.step(
+                "notice", name=str(event.level), detail=event.message, agent=agent
+            )
         elif isinstance(event, agents.TurnEnded):
-            self.step("turn_ended", name=type(event.state).__name__)
+            state = event.state
+            error = getattr(state, "error", None)
+            self.step(
+                "turn_ended",
+                name=type(state).__name__,
+                detail=getattr(error, "message", None) if error is not None else None,
+                error=error is not None,
+                agent=agent,
+            )
 
-    def _entry(self, entry: object) -> None:
+    def _entry(self, entry: object, agent: str | None) -> None:
         if isinstance(entry, agents.ToolCallEntry):
-            self.step("tool_call", name=entry.name, detail=entry.arguments)
+            self.step("tool_call", name=entry.name, detail=entry.arguments, agent=agent)
         elif isinstance(entry, agents.ToolResultEntry):
             text = "".join(getattr(block, "text", "") for block in entry.content)
             self.step(
@@ -98,14 +117,77 @@ class Trace:
                 name=entry.name,
                 detail=text or entry.structured_content,
                 error=entry.is_error,
+                agent=agent,
             )
         elif isinstance(entry, agents.MessageEntry):
             if entry.role == "assistant":
                 self.step(
-                    "model_message", detail=f"{len(entry.text)} chars: {entry.text}"
+                    "model_message",
+                    detail=f"{len(entry.text)} chars: {entry.text}",
+                    agent=agent,
                 )
             else:
-                self.step(f"{entry.role}_message", detail=f"{len(entry.text)} chars")
+                self.step(
+                    f"{entry.role}_message",
+                    detail=f"{len(entry.text)} chars",
+                    agent=agent,
+                )
+
+    @asynccontextmanager
+    async def following_subagents(self, session: object, label: str = "researcher"):
+        """While the block runs, record the steps of every subagent the session starts.
+
+        The lead's own events come through session.run(on_event=...); a subagent's do not, so
+        this polls session.subagents() and follows each new one's events, labelled "<label> N".
+        """
+        followers: list[asyncio.Task[None]] = []
+        seen: set[str] = set()
+        running: dict[str, int] = {}  # subagent label -> turns started but not ended
+
+        async def follow(child: Any, name: str) -> None:
+            try:
+                async for event in child.iter_events():
+                    if isinstance(event, agents.TurnStarted):
+                        running[name] = running.get(name, 0) + 1
+                    elif isinstance(event, agents.TurnEnded):
+                        running[name] = running.get(name, 0) - 1
+                    self.on_event(event, agent=name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.step(
+                    "notice", name="error", detail=f"Lost the events: {e}", agent=name
+                )
+
+        async def watch() -> None:
+            while True:
+                try:
+                    children = await session.subagents()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.debug("Could not list the subagents", exc_info=True)
+                    children = []
+                for child in reversed(children):  # subagents() lists the newest first
+                    if child.id in seen:
+                        continue
+                    seen.add(child.id)
+                    name = f"{label} {len(seen)}"
+                    self.step("subagent_started", name=name, detail=child.id)
+                    followers.append(asyncio.create_task(follow(child, name)))
+                await asyncio.sleep(SUBAGENT_POLL_SECONDS)
+
+        watcher = asyncio.create_task(watch())
+        try:
+            yield
+        finally:
+            for task in (watcher, *followers):
+                task.cancel()
+            await asyncio.gather(watcher, *followers, return_exceptions=True)
+            # Who was still working when the lead stopped, e.g. at a timeout.
+            for name, turns in running.items():
+                if turns > 0:
+                    self.step("subagent_unfinished", name=name, error=True, agent=name)
 
     def finish(self, state: object) -> None:
         """Note how the turn ended: its state, stop reason and tool calls."""

@@ -1,8 +1,11 @@
 """A request's trace: the stages it times and the steps it records from the Agents SDK's events."""
 
+import asyncio
+
 from mistralai import agents
 
-from debeloglav import bot, context, store
+from debeloglav import bot, context, dashboard, store
+from debeloglav import trace as trace_module
 from debeloglav.trace import MAX_STEPS, Trace
 
 
@@ -112,6 +115,97 @@ async def test_run_turn_fills_the_trace(monkeypatch):
     assert data["state"] == "Completed"
     assert {"session_start", "lock_wait", "turn"} <= set(data["stages"])
     assert [s["kind"] for s in data["steps"]][1:3] == ["tool_call", "tool_result"]
+
+
+class ChildSession:
+    def __init__(self, id, finishes):
+        self.id = id
+        self.finishes = finishes
+
+    async def iter_events(self):
+        for event in events(self.id)[:2]:
+            yield event
+        if self.finishes:
+            yield agents.TurnEnded(
+                id="e9",
+                session_id=self.id,
+                turn_id="t1",
+                state=agents.Completed(
+                    session_id=self.id,
+                    turn_id="t1",
+                    cursor="c",
+                    text="ok",
+                    output="ok",
+                    tool_calls=(),
+                ),
+            )
+        await asyncio.Event().wait()  # follows the session until it ends
+
+
+class LeadSession:
+    def __init__(self):
+        self.children = []
+
+    async def subagents(self):
+        return list(reversed(self.children))  # newest first
+
+
+async def test_trace_follows_the_subagents(monkeypatch):
+    monkeypatch.setattr(trace_module, "SUBAGENT_POLL_SECONDS", 0.01)
+    trace = Trace()
+    lead = LeadSession()
+    async with trace.following_subagents(lead):
+        lead.children += [
+            ChildSession("a", finishes=True),
+            ChildSession("b", finishes=False),
+        ]
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+    by_agent = {}
+    for step in trace.steps:
+        by_agent.setdefault(step.get("agent") or step.get("name"), []).append(
+            step["kind"]
+        )
+    assert by_agent["researcher 1"][:3] == [
+        "subagent_started",
+        "turn_started",
+        "tool_call",
+    ]
+    assert by_agent["researcher 1"][-1] == "turn_ended"
+    assert by_agent["researcher 2"][-1] == "subagent_unfinished"
+
+
+def test_tool_timings_pair_calls_per_agent():
+    steps = [
+        {
+            "at_ms": 0,
+            "kind": "tool_call",
+            "name": "web_search",
+            "agent": "researcher 1",
+        },
+        {
+            "at_ms": 10,
+            "kind": "tool_call",
+            "name": "web_search",
+            "agent": "researcher 2",
+        },
+        {
+            "at_ms": 15,
+            "kind": "tool_result",
+            "name": "web_search",
+            "agent": "researcher 2",
+        },
+        {
+            "at_ms": 100,
+            "kind": "tool_result",
+            "name": "web_search",
+            "agent": "researcher 1",
+        },
+    ]
+    assert dashboard.tool_timings({"steps": steps}) == [
+        ("web_search", 5),
+        ("web_search", 100),
+    ]
 
 
 def test_the_trace_is_stored_with_the_activity():

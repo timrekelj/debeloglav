@@ -34,10 +34,18 @@ class Request:
     user_name: str
     message_id: int | None = None  # the message that asked; None for scheduled runs
     is_admin: bool = False  # may change server settings (Manage Server permission)
-    session_id: str | None = None  # the conversation's session, set when its turn starts
-    editable_images: list[EditableImage] = field(default_factory=list)  # this turn's images, set by the bot
-    private: bool = False  # the answer is shown only to the asker (ephemeral), e.g. /zamujeno
-    reply_channel_id: int | None = None  # the thread the bot opened for the answer, if any
+    session_id: str | None = (
+        None  # the conversation's session, set when its turn starts
+    )
+    editable_images: list[EditableImage] = field(
+        default_factory=list
+    )  # this turn's images, set by the bot
+    private: bool = (
+        False  # the answer is shown only to the asker (ephemeral), e.g. /zamujeno
+    )
+    reply_channel_id: int | None = (
+        None  # the thread the bot opened for the answer, if any
+    )
 
 
 _requests: dict[str, Request] = {}
@@ -50,6 +58,9 @@ search_messages: Callable[..., Awaitable[dict[str, object]]] | None = None
 
 # Set by the bot: reads what was written in a channel since the asker last wrote there (see catchup.catch_up).
 catch_up: Callable[..., Awaitable[dict[str, object]]] | None = None
+
+# Set by the bot: the status of the server's recent requests (see status.request_status).
+request_status: Callable[..., Awaitable[dict[str, object]]] | None = None
 
 
 @dataclass
@@ -65,13 +76,21 @@ class Found:
     """What the tools of one turn found, for the bot to attach to the reply."""
 
     sources: dict[str, str] = field(default_factory=dict)  # url -> title
-    images: list[FoundImage] = field(default_factory=list)  # generated or edited images, as bytes
+    images: list[FoundImage] = field(
+        default_factory=list
+    )  # generated or edited images, as bytes
 
 
 _found: dict[str, Found] = {}
 
 
-def record(ctx: agents.ToolCallbackContext, *, sources: dict[str, str] | None = None, image: bytes | None = None, regenerated: bool = False) -> None:
+def record(
+    ctx: agents.ToolCallbackContext,
+    *,
+    sources: dict[str, str] | None = None,
+    image: bytes | None = None,
+    regenerated: bool = False,
+) -> None:
     """Note sources or a generated image for the conversation's current turn."""
     if ctx.session.id not in _requests:
         return  # a session the bot does not post from, such as a research subagent

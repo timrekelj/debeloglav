@@ -964,6 +964,8 @@ STEP_LABELS = {
     "turn_ended": "Turn ended",
     "busy_wait": "Waited for another turn",
     "session_restarted": "Session restarted",
+    "subagent_started": "Subagent started",
+    "subagent_unfinished": "Subagent still running",
 }
 # What the time before a step was spent on.
 STEP_GAPS = {
@@ -987,15 +989,19 @@ def tool_name(name: str | None) -> str:
 
 
 def tool_timings(trace: dict) -> list[tuple[str, int]]:
-    """How long each tool call ran: each call paired with the next result of the same tool."""
-    pending: dict[str, list[int]] = {}
+    """How long each tool call ran: each call paired with the next result of the same tool,
+    from the same agent (a research job's researchers call tools at the same time)."""
+    pending: dict[tuple[str | None, str], list[int]] = {}
     timings: list[tuple[str, int]] = []
     for step in trace.get("steps", []):
         name = tool_name(step.get("name"))
+        agent = step.get("agent")
         if step.get("kind") == "tool_call":
-            pending.setdefault(name, []).append(step["at_ms"])
+            pending.setdefault((agent, name), []).append(step["at_ms"])
         elif step.get("kind") == "tool_result":
-            calls = pending.get(name) or next((q for q in pending.values() if q), None)
+            calls = pending.get((agent, name)) or next(
+                (q for (a, _), q in pending.items() if a == agent and q), None
+            )
             if calls:
                 timings.append((name, step["at_ms"] - calls.pop(0)))
     return timings
@@ -1008,7 +1014,7 @@ def tools_used(a: store.Activity) -> list[str]:
     return [
         tool_name(s.get("name"))
         for s in a.trace.get("steps", [])
-        if s.get("kind") == "tool_call"
+        if s.get("kind") == "tool_call" and not s.get("agent")  # the lead's own calls
     ]
 
 
@@ -1368,10 +1374,14 @@ async def request_detail(request: web.Request) -> web.Response:
 
     steps = t.get("steps", [])
     step_rows = []
-    previous = None
+    previous: dict[
+        str | None, int
+    ] = {}  # agent -> its last step, so gaps are per agent
     for step in steps:
-        gap = step["at_ms"] - previous if previous is not None else None
-        previous = step["at_ms"]
+        agent = step.get("agent")
+        last = previous.get(agent)
+        gap = step["at_ms"] - last if last is not None else None
+        previous[agent] = step["at_ms"]
         gap_html = ""
         if gap is not None:
             why = STEP_GAPS.get(step["kind"], "")
@@ -1392,9 +1402,10 @@ async def request_detail(request: web.Request) -> web.Response:
             f"<code>{e(tool_name(name) if is_tool else name)}</code>" if name else ""
         )
         label = STEP_LABELS.get(step["kind"], step["kind"])
+        agent_html = f"<span class='sub'>{e(agent)}</span>" if agent else ""
         step_rows.append(
             f"<tr><td class='num'>{e(fmt_ms(step['at_ms']))}{gap_html}</td>"
-            f"<td><span class='pill plain {pill}'>{e(label)}</span></td>"
+            f"<td><span class='pill plain {pill}'>{e(label)}</span>{agent_html}</td>"
             f"<td>{name_html}</td>"
             f"<td class='wrap'>{detail_html}</td></tr>"
         )
