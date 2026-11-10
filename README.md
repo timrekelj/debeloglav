@@ -50,6 +50,7 @@ The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/styl
 ### Background research
 
 - `@Debeloglav razišči podrobno …` → it answers that it's on it, reacts with 🔬, and a research lead agent splits the question and runs up to 5 researcher subagents in parallel. When the report is ready it's posted as a reply to your message and the 🔬 is removed. Reply to the report to ask follow-ups.
+- The lead and its researchers search the web, and in a server also its messages (the same search as above, limited to the channels the person who asked can read), so a report can combine what was said on the server with what the web says.
 
 ### Scheduled tasks
 

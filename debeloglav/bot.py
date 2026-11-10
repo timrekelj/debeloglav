@@ -472,6 +472,7 @@ class Debeloglav(discord.Client):
             )
             with trace.stage("session_start"):
                 session = await research_agent.start_session()
+            context.register_research(session, request)  # its tools search for the asker
             trace.info["session_id"] = session.id
             prompt = f"{now_line()}\n\nResearch question from {request.user_name}:\n{question}"
             minutes = settings.get_int("research_timeout_minutes")
@@ -500,6 +501,7 @@ class Debeloglav(discord.Client):
         finally:
             self.research_jobs -= 1
             if session is not None:
+                context.forget_research(session.id)
                 trace.collect_usage(session.id)
                 with suppress(Exception):
                     await session.cancel()

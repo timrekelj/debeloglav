@@ -1,16 +1,21 @@
 """Who is asking, for each running session, so tools can act for the right Discord server and user.
 
 The bot registers a Request before each turn. A tool reads it through its ToolCallbackContext's
-session id; the model never sees it.
+session id; the model never sees it. A research job's sessions (the lead and its researchers) act
+for the request that started the research (asker).
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from mistralai import agents
 
 from . import settings
+
+log = logging.getLogger("debeloglav.context")
 
 
 def timezone() -> ZoneInfo:
@@ -120,3 +125,43 @@ def current(ctx: agents.ToolCallbackContext) -> Request:
     if request is None:
         raise agents.ToolError("This tool only works in a Discord conversation.")
     return request
+
+
+# --- Research ------------------------------------------------------------------------------------
+# A research job runs in sessions of its own, which the bot does not post from: they are kept
+# apart from _requests, so record() still skips them and the asking conversation stays registered.
+
+_research: dict[str, tuple[Any, Request]] = {}  # lead session id -> its session, the request
+_researchers: dict[str, str] = {}  # researcher session id -> its lead's session id
+
+
+def register_research(session: Any, request: Request) -> None:
+    """Let the tools of a research lead's session, and of the researchers it starts, act for the request."""
+    _research[session.id] = (session, request)
+
+
+def forget_research(session_id: str) -> None:
+    _research.pop(session_id, None)
+    for researcher, lead in list(_researchers.items()):
+        if lead == session_id:
+            del _researchers[researcher]
+
+
+async def asker(ctx: agents.ToolCallbackContext) -> Request:
+    """Like current, but also for a research job's lead and researchers."""
+    session_id = ctx.session.id
+    if session_id in _requests:
+        return _requests[session_id]
+    if session_id not in _research and session_id not in _researchers:
+        # A callback knows only its own session: ask each running lead for its researchers.
+        for lead_id, (lead, _) in list(_research.items()):
+            try:
+                children = await lead.subagents()
+            except Exception:
+                log.debug("Could not list the subagents of %s", lead_id, exc_info=True)
+                continue
+            _researchers.update((child.id, lead_id) for child in children)
+    found = _research.get(_researchers.get(session_id, session_id))
+    if found is None:
+        raise agents.ToolError("This tool only works in a Discord conversation.")
+    return found[1]

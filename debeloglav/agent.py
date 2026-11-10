@@ -409,7 +409,7 @@ async def search_discord_messages(
     by_relevance: sort by relevance instead of time.
     limit: how many messages to return, 25 by default, at most 200. To only count messages, use 1 and read total.
     """
-    request = context.current(ctx)
+    request = await context.asker(ctx)
     if context.search_messages is None:
         raise agents.ToolError("Message search is not available.")
     return await context.search_messages(
@@ -743,12 +743,14 @@ RESEARCH_INSTRUCTIONS = """You are Debeloglav's research lead. You get one resea
    name, message and config_name are all required: the task goes in message (not task, prompt or question), and each researcher gets its own name. The researcher config exists already: don't call list_configs.
 3. Wait for every researcher's result before you write anything.
 4. If something important is missing or contradictory, run web_search yourself or start another researcher.
-5. Write the report: a short direct answer first, then the findings, organised with headings and bullet points, then caveats or open questions. Point out where sources disagree.
+5. When the question is also about this Discord server, its people or what was said here, have a researcher search the server's messages with search_discord_messages (say so in its task), or search them yourself. It only works in a server, not in DMs.
+6. Write the report: a short direct answer first, then the findings, organised with headings and bullet points, then caveats or open questions. Point out where sources disagree.
 
 Write in Slovenian, in a relaxed, friendly tone (tikaj, no stiff formal phrases), while keeping the content precise. Use Discord markdown (headings with ##, bullets, bold), no tables. Aim for 300 to 900 words.
-End with a "Viri" section: the 3 to 8 most important URLs from the researchers' results, as markdown links written [title](<url>). Never invent sources."""
+End with a "Viri" section: the 3 to 8 most important URLs from the researchers' results, as markdown links written [title](<url>); for Discord messages, the links to the messages. Never invent sources."""
 
 RESEARCHER_INSTRUCTIONS = """You research one sub-question on the web. Run several web_search queries from different angles, compare what you find, and check claims across sources.
+When your task asks what was said on the Discord server, use search_discord_messages instead: it is a keyword search, so try the words people would have typed, and variants. Quote who wrote what and when, with the link to each message.
 Report your findings as concise facts with numbers and dates, and list the URL of the source behind each fact. Say plainly what you could not verify."""
 
 
@@ -758,7 +760,7 @@ def build_research_agent() -> agents.Agent:
         name="debeloglav-research",
         model=model,
         instructions=RESEARCH_INSTRUCTIONS,
-        tools=[web_search],
+        tools=[web_search, search_discord_messages],
         hooks=[usage.Meter(model=model)],
         # Subagents need programmatic tool calling: the lead starts them from code it writes.
         builtins=agents.Builtins(skills=False),
@@ -766,9 +768,9 @@ def build_research_agent() -> agents.Agent:
         subagents=[
             agents.Subagent(
                 name="researcher",
-                description="Researches one sub-question on the web and reports the facts with their source URLs.",
+                description="Researches one sub-question on the web, or in this Discord server's messages, and reports the facts with their source URLs.",
                 instructions=RESEARCHER_INSTRUCTIONS,
-                tools=[web_search],
+                tools=[web_search, search_discord_messages],
                 builtins=QUIET,
                 hooks=[usage.Meter(model=model)],
                 max_iterations=12,
