@@ -212,6 +212,27 @@ async def test_render_labels_a_regenerated_image():
     assert text.endswith("-# Slike ni bilo mogoče urediti, zato je ustvarjena na novo.")
 
 
+async def test_render_keeps_links_from_embedding():
+    answer = bot.Answer(
+        text=(
+            "Viri:\n- [Gorenjski glas](https://gorenjskiglas.si/a)\n"
+            "- [Wiki](https://en.wikipedia.org/wiki/Vodice_(Slovenia))\n"
+            "- [Že prav](<https://x.si>)\n"
+            "Glej https://rtv.si/b. Ali (https://c.si) in **https://d.si**\n"
+            "`curl https://e.si`"
+        ),
+        found=Found(),
+    )
+    text, _files = await bot.render(answer)
+    assert text == (
+        "Viri:\n- [Gorenjski glas](<https://gorenjskiglas.si/a>)\n"
+        "- [Wiki](<https://en.wikipedia.org/wiki/Vodice_(Slovenia)>)\n"
+        "- [Že prav](<https://x.si>)\n"
+        "Glej <https://rtv.si/b>. Ali (<https://c.si>) in **<https://d.si>**\n"
+        "`curl https://e.si`"
+    )
+
+
 async def test_render_does_not_label_a_real_edit():
     answer = bot.Answer(
         text="Spremenjeno.",

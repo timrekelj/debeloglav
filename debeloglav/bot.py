@@ -6,6 +6,7 @@ import functools
 import io
 import logging
 import os
+import re
 import shutil
 import time
 from contextlib import suppress
@@ -891,6 +892,31 @@ def parse(state: agents.TurnState, session_id: str | None = None) -> Answer | No
             return None
 
 
+CODE = re.compile(r"(```[\s\S]*?```|`[^`\n]*`)")
+# A markdown link's URL, allowing one level of parentheses (as in Wikipedia URLs).
+MARKDOWN_LINK = re.compile(r"\]\((https?://(?:[^\s()<>]|\([^\s()<>]*\))+)\)")
+BARE_URL = re.compile(r"(?<![<\[\w/])https?://[^\s<>]+")
+
+
+def _wrap_bare(match: re.Match[str]) -> str:
+    url = match.group()
+    # Trailing punctuation ends the sentence, not the URL; so does a ")" with no "(" in it.
+    while url[-1] in ".,;:!?'\"*_" or (
+        url[-1] == ")" and url.count("(") < url.count(")")
+    ):
+        url = url[:-1]
+    return f"<{url}>{match.group()[len(url) :]}"
+
+
+def no_embeds(text: str) -> str:
+    """Wrap every link in <>, so Discord doesn't unfurl them into embeds. Code is left as is."""
+    parts = CODE.split(text)
+    for i in range(0, len(parts), 2):  # odd parts are the code
+        part = MARKDOWN_LINK.sub(r"](<\1>)", parts[i])
+        parts[i] = BARE_URL.sub(_wrap_bare, part)
+    return "".join(parts)
+
+
 async def render(
     reply: Answer | None, max_chars: int = MAX_REPLY_CHARS
 ) -> tuple[str, list[discord.File]]:
@@ -905,7 +931,7 @@ async def render(
             discord.File(io.BytesIO(image.data), filename=f"debeloglav_{i + 1}{suffix}")
         )
 
-    text = guard.cap(guard.trim_runaway(reply.text), max_chars)
+    text = no_embeds(guard.cap(guard.trim_runaway(reply.text), max_chars))
     if not text and not files:
         text = "Hmm, na to nimam odgovora."
     if reply.found.sources:
