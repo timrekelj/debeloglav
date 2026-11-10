@@ -380,9 +380,11 @@ async def search_discord_messages(
     before: str | None = None,
     oldest_first: bool = False,
     by_relevance: bool = False,
+    limit: int = 25,
 ) -> dict[str, object]:
-    """Search this server's message history. Returns up to 25 matching messages with author, channel, time and a link.
-    If more_may_exist is true, narrow the search (dates, channel, author) to see the rest.
+    """Search this server's message history. Returns the matching messages with author, channel, time and a link,
+    and total: how many messages match in the whole server, also beyond the ones returned.
+    If more_may_exist is true, raise limit or narrow the search (dates, channel, author) to see the rest.
 
     content: keywords to find. Keyword search, not semantic: use the words people would have typed, and try variants.
     author: who wrote it: their name, nickname, @mention or user id.
@@ -392,6 +394,7 @@ async def search_discord_messages(
     after / before: local ISO dates or date-times, e.g. 2026-03-01.
     oldest_first: sort oldest first, e.g. to find when something was first said.
     by_relevance: sort by relevance instead of time.
+    limit: how many messages to return, 25 by default, at most 200. To only count messages, use 1 and read total.
     """
     request = context.current(ctx)
     if context.search_messages is None:
@@ -407,6 +410,7 @@ async def search_discord_messages(
         before=before,
         oldest_first=oldest_first,
         by_relevance=by_relevance,
+        limit=limit,
     )
 
 
@@ -650,7 +654,6 @@ Catching up:
 - Summarize the main topics, decisions, plans and anything addressed to the asker, grouped by topic, concise. Say who said what by nickname.
 - Link the 3 to 5 key messages as markdown links [short description](<url>), taking the URLs from the links map.
 - If count is 0, say nothing happened in the channel since then.
-- Never post content from a channel not everyone in the server can read: search_discord_messages hides those matches (hidden_private) and catch_up refuses them — point the person to /zamujeno, which answers privately.
 
 Scheduling:
 - Each message gives the current local time. Use schedule_task for reminders ("remind me in 2 hours"), recurring jobs ("every morning at 8, post the AI news") and watches ("tell me when X happens"). Convert relative times to an absolute local time. Write the task's prompt so that it makes sense on its own later.

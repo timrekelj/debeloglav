@@ -12,7 +12,9 @@ from . import blocked, polls
 from .context import Request, timezone
 from .mentions import who
 
-MAX_RESULTS = 25
+PAGE = 25  # the most Discord returns per request
+DEFAULT_RESULTS = 25
+MAX_RESULTS = 200
 MAX_CHARS = 400
 INDEX_RETRIES = 3
 
@@ -32,6 +34,7 @@ async def search(
     before: str | None = None,
     oldest_first: bool = False,
     by_relevance: bool = False,
+    limit: int = DEFAULT_RESULTS,
 ) -> dict[str, object]:
     if not request.scope.startswith("guild:"):
         raise agents.ToolError("Message search only works in a server, not in DMs.")
@@ -41,7 +44,7 @@ async def search(
     asker = await asker_of(guild, request)
 
     params: list[tuple[str, str]] = [
-        ("limit", str(MAX_RESULTS)),
+        ("limit", str(PAGE)),
         ("author_type", "user"),
     ]
     if content:
@@ -67,54 +70,73 @@ async def search(
     else:
         params.append(("sort_order", "asc" if oldest_first else "desc"))
 
+    limit = max(1, min(limit, MAX_RESULTS))
     route = Route("GET", "/guilds/{guild_id}/messages/search", guild_id=guild.id)
+    results: list[dict[str, object]] = []
+    total = 0
+    offset = 0
+    while offset < limit:
+        data = await fetch_page(bot, route, [*params, ("offset", str(offset))])
+        total = int(data.get("total_results") or 0)
+        groups = data.get("messages", [])
+        offset += len(groups)
+        for group in groups:
+            for message in group[:1]:
+                place = guild.get_channel_or_thread(int(message["channel_id"]))
+                # Only show what the person asking could read themselves, minus the blocked channels.
+                if (
+                    place is None
+                    or not readable(place, asker)
+                    or blocked.channel(place)
+                ):
+                    continue
+                results.append(describe(guild, place, message))
+        if len(groups) < PAGE or offset >= total:
+            break
+    return {
+        "messages": results[:limit],
+        # Discord's count of every match, including those in channels left out above.
+        "total": total,
+        "more_may_exist": offset < total,
+    }
+
+
+async def fetch_page(
+    bot: discord.Client, route: Route, params: list[tuple[str, str]]
+) -> dict:
     for _ in range(INDEX_RETRIES):
         data = await bot.http.request(route, params=params)
         if (
             data.get("code") != 110000
         ):  # 110000: the server's search index is still being built
-            break
+            return data
         await asyncio.sleep(min(float(data.get("retry_after") or 2), 5))
-    else:
-        raise agents.ToolError(
-            "Discord is still indexing this server for search. Try again in a minute."
-        )
+    raise agents.ToolError(
+        "Discord is still indexing this server for search. Try again in a minute."
+    )
 
-    groups = data.get("messages", [])
-    results = []
-    hidden_private = 0
-    for group in groups:
-        for message in group[:1]:
-            place = guild.get_channel_or_thread(int(message["channel_id"]))
-            # Only show what the person asking could read themselves, and only what everyone
-            # where the answer is posted could read too (a private channel is not shared there).
-            if place is None or not readable(place, asker) or blocked.channel(place):
-                continue
-            if not shareable(guild, place, request):
-                hidden_private += 1
-                continue
-            author_data = message["author"]
-            member = guild.get_member(int(author_data["id"]))
-            sent = datetime.fromisoformat(message["timestamp"]).astimezone(timezone())
-            result = {
-                "author": who(member)
-                if member
-                else f"{author_data.get('global_name') or author_data['username']} (@{author_data['username']})",
-                "channel": f"#{place.name}",
-                "time": f"{sent:%Y-%m-%d %H:%M}",
-                "content": readable_content(guild, message)[:MAX_CHARS],
-                "attachments": [a["filename"] for a in message.get("attachments", [])],
-                "link": f"https://discord.com/channels/{guild.id}/{message['channel_id']}/{message['id']}",
-            }
-            if poll := message.get("poll"):
-                result["poll"] = polls.describe_raw(poll)
-            results.append(result)
-    # Discord's total counts matches in channels the asker can't read, so it isn't passed on.
-    return {
-        "messages": results,
-        "more_may_exist": len(groups) >= MAX_RESULTS,
-        "hidden_private": hidden_private,  # matches from private channels, left out above
+
+def describe(
+    guild: discord.Guild,
+    place: discord.abc.GuildChannel | discord.Thread,
+    message: dict,
+) -> dict[str, object]:
+    author_data = message["author"]
+    member = guild.get_member(int(author_data["id"]))
+    sent = datetime.fromisoformat(message["timestamp"]).astimezone(timezone())
+    result: dict[str, object] = {
+        "author": who(member)
+        if member
+        else f"{author_data.get('global_name') or author_data['username']} (@{author_data['username']})",
+        "channel": f"#{place.name}",
+        "time": f"{sent:%Y-%m-%d %H:%M}",
+        "content": readable_content(guild, message)[:MAX_CHARS],
+        "attachments": [a["filename"] for a in message.get("attachments", [])],
+        "link": f"https://discord.com/channels/{guild.id}/{message['channel_id']}/{message['id']}",
     }
+    if poll := message.get("poll"):
+        result["poll"] = polls.describe_raw(poll)
+    return result
 
 
 async def asker_of(guild: discord.Guild, request: Request) -> discord.Member:
@@ -158,34 +180,6 @@ def readable(
 ) -> bool:
     permissions = place.permissions_for(who)
     return permissions.view_channel and permissions.read_message_history
-
-
-def shareable(
-    guild: discord.Guild,
-    place: discord.abc.GuildChannel | discord.Thread,
-    request: Request,
-) -> bool:
-    """Whether content from `place` may be shown where this request's answer is posted.
-
-    The answer is posted in the channel the question was asked in, where others read it too,
-    so a channel only some can read is shareable only where everyone can read it already.
-    A private request (e.g. /zamujeno, answered ephemerally) may show anything the asker can read.
-    """
-    if request.private:
-        return True
-    if place.id == request.channel_id:
-        return True
-    # A public thread of the channel the answer is posted in is readable wherever that channel is.
-    if getattr(place, "parent_id", None) == request.channel_id and not _private_thread(
-        place
-    ):
-        return True
-    return readable(place, guild.default_role)
-
-
-def _private_thread(place: discord.abc.GuildChannel | discord.Thread) -> bool:
-    is_private = getattr(place, "is_private", None)
-    return bool(is_private() if callable(is_private) else is_private)
 
 
 async def find_member(guild: discord.Guild, who: str) -> discord.Member:

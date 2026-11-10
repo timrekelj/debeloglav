@@ -39,13 +39,12 @@ The guide is stored in SQLite next to memories and tasks. Code: `debeloglav/styl
 ### Searching the server's history
 
 - `@Debeloglav kdaj je @Luka rekel, da je pizza overrated?`, `kdo je poslal tisti link do Steama?`, `poišči slike iz #izlet od marca` → it searches the server's messages with Discord's search, and answers with quotes, who, when and links to the messages.
-- It only shows messages from channels the person asking can read, and skips age-restricted channels.
-- The answer is posted in the channel where the question was asked, so it also leaves out messages from channels not everyone in the server can read (counted in `hidden_private`); for those, `/zamujeno` gives a private summary.
+- It shows messages from every channel the person asking can read, except the channels blocked in the dashboard and age-restricted ones.
+- It reads 25 messages per search by default and up to 200 when it asks for more, and it always gets the total number of matches, so it can answer `koliko sporočil je napisal @Luka?`.
 
 ### Catching up
 
 - `@Debeloglav kaj sem zamudil?` or `kaj sem zamudil v #general?` → it reads the channel since your last message there (up to 300 messages) and summarizes what you missed: the main topics, decisions, plans and anything addressed to you, with links to the key messages. If you haven't written there recently, it covers the last 300 messages. Code: `debeloglav/catchup.py`.
-- A channel not everyone in the server can read is never summarized in a public answer: the bot refuses and points to `/zamujeno`, which only the asker sees.
 - `/zamujeno [kanal]` → the same summary, but privately: a slash command for everyone that answers ephemerally (only you see it), in this channel or in the one you name. Code: `debeloglav/commands.py`.
 
 ### Background research

@@ -2,7 +2,7 @@
 
 It reads the activity log the dashboard shows, so people can ask the bot in Discord what happened
 to their research or why it didn't answer. Only this server's rows are shown, and the question,
-reply and failure details of a channel that isn't shareable where the answer is posted are left out.
+reply and failure details of a channel the asker can't read, or a blocked one, are left out.
 """
 
 import discord
@@ -132,7 +132,6 @@ async def request_status(
                 and asker is not None
                 and discord_search.readable(place, asker)
                 and not blocked.channel(place)
-                and discord_search.shareable(guild, place, request)
             )
             place_name = f"#{place.name}" if place is not None else None
         results.append(describe(row, shown=shown, place_name=place_name))

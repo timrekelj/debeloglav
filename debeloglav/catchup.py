@@ -43,11 +43,6 @@ async def catch_up(
         )
     if blocked.channel(place) or not discord_search.readable(place, asker):
         raise agents.ToolError(f"#{place.name} is not a channel you can read.")
-    if not discord_search.shareable(guild, place, request):
-        raise agents.ToolError(
-            f"#{place.name} is private: its summary can't be posted here. "
-            f"Tell the person to use /zamujeno {place.name}, which only they will see."
-        )
 
     # Newest first, back to the message that asked (excluded) or to the asker's last one there.
     before = (

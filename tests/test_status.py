@@ -15,7 +15,7 @@ PUBLIC, SECRET = 10, 20
 
 def bot():
     guild = FakeGuild(
-        [FakeChannel(PUBLIC, "splosno"), FakeChannel(SECRET, "admini", public=False)],
+        [FakeChannel(PUBLIC, "splosno"), FakeChannel(SECRET, "admini", view=False)],
         [person(ASKER, "tim")],
     )
     return SimpleNamespace(get_guild=lambda guild_id: guild)
@@ -96,16 +96,11 @@ async def test_lists_this_servers_requests_newest_first():
     assert all("tuje" != r.get("question") for r in rows)  # another server's row
 
 
-async def test_hides_a_private_channels_content():
+async def test_hides_the_content_of_a_channel_the_asker_cannot_read():
     rows = (await status.request_status(bot(), request(), limit=10))["requests"]
     secret = rows[1]
     assert secret["channel"] == "a private channel"
     assert "question" not in secret and "reply" not in secret
-    # asked privately (e.g. ephemerally) it may show it
-    rows = (await status.request_status(bot(), request(private=True), limit=10))[
-        "requests"
-    ]
-    assert rows[1]["question"] == "skrivnost" and rows[1]["channel"] == "#admini"
 
 
 async def test_explains_a_failed_research():

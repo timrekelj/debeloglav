@@ -57,18 +57,8 @@ def poll_answer(text, count=0, emoji=None, id=1):
     return SimpleNamespace(id=id, text=text, vote_count=count, emoji=emoji)
 
 
-class FakeRole:
-    """The @everyone role: what everyone in the server can read."""
-
-    def __init__(self, id=0, name="@everyone"):
-        self.id = id
-        self.name = name
-
-
 class FakeChannel:
-    def __init__(
-        self, id, name, messages, view=True, history=True, category_id=None, public=True
-    ):
+    def __init__(self, id, name, messages, view=True, history=True, category_id=None):
         self.id = id
         self.name = name
         self.category_id = category_id
@@ -76,14 +66,8 @@ class FakeChannel:
         self.parent_id = None
         self.messages = messages  # newest first, like channel.history
         self.perms = SimpleNamespace(view_channel=view, read_message_history=history)
-        # what the @everyone role can read: a private channel is not public
-        self.role_perms = SimpleNamespace(
-            view_channel=public, read_message_history=public
-        )
 
     def permissions_for(self, who):
-        if isinstance(who, FakeRole):
-            return self.role_perms
         return self.perms
 
     def history(self, limit=None, before=None):
@@ -101,17 +85,13 @@ class FakeChannel:
 
 
 class FakeThread(FakeChannel):
-    def __init__(self, id, name, parent_id, messages, private=False, **kwargs):
+    def __init__(self, id, name, parent_id, messages, **kwargs):
         super().__init__(id, name, messages, **kwargs)
         self.parent_id = parent_id
-        self._private = private
-
-    def is_private(self):
-        return self._private
 
 
 class FakeGuild:
-    def __init__(self, channels, members, default_role=None):
+    def __init__(self, channels, members):
         self.id = 1
         self.channels = {c.id: c for c in channels}
         self.members = {m.id: m for m in members}
@@ -123,7 +103,6 @@ class FakeGuild:
         self.threads = [c for c in channels if isinstance(c, FakeThread)]
         self.forums = []
         self.voice_channels = []
-        self.default_role = default_role or FakeRole()
 
     def get_member(self, user_id):
         return self.members.get(user_id)
@@ -156,14 +135,13 @@ def setup(messages, channel_id=10, name="general", **channel_kwargs):
     return FakeBot(guild), channel
 
 
-def request(channel_id=10, message_id=None, scope="guild:1", private=False):
+def request(channel_id=10, message_id=None, scope="guild:1"):
     return Request(
         scope=scope,
         channel_id=channel_id,
         user_id=ASKER,
         user_name="Asker (@asker)",
         message_id=message_id,
-        private=private,
     )
 
 
@@ -423,88 +401,27 @@ async def test_a_channel_without_history_permission_raises():
         await catchup.catch_up(bot, request())
 
 
-async def test_a_private_channel_asked_about_in_a_public_channel_raises():
-    # #mods is readable by the asker, but not by everyone; the question is in #general
+async def test_a_channel_not_everyone_can_read_is_allowed_from_another_channel():
+    # only some roles can read #mods; the asker is one of them, and asks in #general
     luka = person(7, "luka", "Luka")
-    mods = FakeChannel(
-        20, "mods", [message(100, luka, "secret mod talk")], public=False
-    )
+    mods = FakeChannel(20, "mods", [message(100, luka, "mod talk")])
     general = FakeChannel(10, "general", [message(90, luka, "hi")])
     guild = FakeGuild([general, mods], [person(ASKER, "asker"), luka])
     bot = FakeBot(guild)
-    with pytest.raises(agents.ToolError, match=r"#mods is private.*/zamujeno mods"):
-        await catchup.catch_up(bot, request(), channel="mods")
-
-
-async def test_a_private_channel_the_question_is_asked_in_is_allowed():
-    # the answer is posted in that same private channel, so everyone there can already read it
-    bot, _ = setup([message(100, person(7, "luka"), "hi")], public=False)
-    result = await catchup.catch_up(bot, request())
-    assert result["channel"] == "#general"
-    assert "hi" in result["messages"]
-
-
-async def test_a_public_channel_is_allowed_from_another_channel():
-    luka = person(7, "luka", "Luka")
-    other = FakeChannel(20, "other", [message(100, luka, "public talk")], public=True)
-    general = FakeChannel(10, "general", [message(90, luka, "hi")])
-    guild = FakeGuild([general, other], [person(ASKER, "asker"), luka])
-    bot = FakeBot(guild)
-    result = await catchup.catch_up(bot, request(), channel="other")
-    assert result["channel"] == "#other"
-    assert "public talk" in result["messages"]
-
-
-async def test_a_private_request_may_catch_up_a_private_channel():
-    # /zamujeno answers ephemerally, so only the asker sees the summary
-    luka = person(7, "luka", "Luka")
-    mods = FakeChannel(
-        20, "mods", [message(100, luka, "secret mod talk")], public=False
-    )
-    general = FakeChannel(10, "general", [message(90, luka, "hi")])
-    guild = FakeGuild([general, mods], [person(ASKER, "asker"), luka])
-    bot = FakeBot(guild)
-    result = await catchup.catch_up(bot, request(private=True), channel="mods")
+    result = await catchup.catch_up(bot, request(), channel="mods")
     assert result["channel"] == "#mods"
-    assert "secret mod talk" in result["messages"]
+    assert "mod talk" in result["messages"]
 
 
-async def test_a_public_thread_of_the_channel_the_question_is_asked_in_is_allowed():
-    # #general is private, but the answer is posted there; a public thread of it is readable
-    # wherever #general is, so its content may be shown there
+async def test_a_thread_is_allowed():
     luka = person(7, "luka", "Luka")
-    thread = FakeThread(
-        30,
-        "nit",
-        10,
-        [message(100, luka, "in the thread")],
-        private=False,
-        public=False,
-    )
-    general = FakeChannel(10, "general", [message(90, luka, "hi")], public=False)
+    thread = FakeThread(30, "nit", 10, [message(100, luka, "in the thread")])
+    general = FakeChannel(10, "general", [message(90, luka, "hi")])
     guild = FakeGuild([general, thread], [person(ASKER, "asker"), luka])
     bot = FakeBot(guild)
     result = await catchup.catch_up(bot, request(), channel="nit")
     assert result["channel"] == "#nit"
     assert "in the thread" in result["messages"]
-
-
-async def test_a_private_thread_of_the_asking_channel_raises():
-    # a private thread is not readable by everyone, even under a public channel
-    luka = person(7, "luka", "Luka")
-    thread = FakeThread(
-        30,
-        "skrivna-nit",
-        10,
-        [message(100, luka, "v nitki")],
-        private=True,
-        public=False,
-    )
-    general = FakeChannel(10, "general", [message(90, luka, "hi")])
-    guild = FakeGuild([general, thread], [person(ASKER, "asker"), luka])
-    bot = FakeBot(guild)
-    with pytest.raises(agents.ToolError, match="is private"):
-        await catchup.catch_up(bot, request(), channel="skrivna-nit")
 
 
 def test_the_hook_is_unset_until_the_bot_sets_it():
