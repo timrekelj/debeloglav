@@ -13,7 +13,7 @@ from mistralai import agents
 from mistralai.client import Mistral
 from mistralai.client import models as api_models
 
-from . import context, settings, store
+from . import context, settings, store, usage
 from .context import timezone
 from .scheduler import MIN_CRON_INTERVAL, cron_interval, next_cron_run
 
@@ -39,12 +39,14 @@ async def web_search(
     ctx: agents.ToolCallbackContext, /, query: str
 ) -> dict[str, object]:
     """Search the web for current or factual information. Returns a summary of what was found and its sources."""
+    model = settings.get("tool_model")
     response = await client.beta.conversations.start_async(
-        model=settings.get("tool_model"),
+        model=model,
         inputs=query,
         tools=[{"type": "web_search"}],
         store=False,
     )
+    usage.record_response(model, response, ctx.session.id)
     text: list[str] = []
     sources: dict[str, str] = {}  # url -> title
     for entry in response.outputs:
@@ -80,7 +82,7 @@ IMG_URL_RE = re.compile(r"https?://[^\s)\]\"'`}]+", re.IGNORECASE)
 @agents.tool(model_access="direct")
 async def generate_image(ctx: agents.ToolCallbackContext, /, prompt: str) -> str:
     """Generate an image from a detailed description. The image is attached to your reply automatically."""
-    images = await _generate_images(prompt)
+    images = await _generate_images(prompt, session_id=ctx.session.id)
     if not images:
         raise agents.ToolError("The image could not be generated.")
     for data in images:
@@ -109,16 +111,17 @@ async def edit_image(
         )
     target = editable[image - 1]
     for _ in range(2):  # try a real edit twice before falling back to regenerating
-        edited = await _edit_image_once(instruction, target.data)
+        edited = await _edit_image_once(instruction, target.data, ctx.session.id)
         if edited is not None:
             context.record(ctx, image=edited)
             return "The image is edited and will be attached to your reply."
     # The hosted tool would not edit our image: describe it, then generate a new version with the change.
-    description = await _describe_image(target.data)
+    description = await _describe_image(target.data, ctx.session.id)
     images = await _generate_images(
         "Recreate this image with the requested change applied.\n"
         f"Description of the original image: {description}\n"
-        f"Change to apply: {instruction}"
+        f"Change to apply: {instruction}",
+        session_id=ctx.session.id,
     )
     if not images:
         raise agents.ToolError("The image could not be edited or regenerated.")
@@ -129,7 +132,9 @@ async def edit_image(
     )
 
 
-async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
+async def _edit_image_once(
+    instruction: str, data: bytes, session_id: str | None = None
+) -> bytes | None:
     """One real-edit attempt: upload the image, hand the hosted tool its signed URL, and accept the
     result only if the tool really edited that URL. Returns the edited bytes, or None."""
     try:
@@ -144,8 +149,9 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
         url = (
             await client.files.get_signed_url_async(file_id=uploaded.id, expiry=24)
         ).url
+        model = settings.get("tool_model")
         response = await client.beta.conversations.start_async(
-            model=settings.get("tool_model"),
+            model=model,
             instructions=EDIT_INSTRUCTIONS,
             inputs=[
                 {
@@ -162,6 +168,7 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
             tools=[{"type": "image_generation"}],
             store=False,
         )
+        usage.record_response(model, response, session_id)
         used = None
         for entry in _tool_execution_entries(response, "image_generation"):
             try:
@@ -188,10 +195,11 @@ async def _edit_image_once(instruction: str, data: bytes) -> bytes | None:
             await client.files.delete_async(file_id=uploaded.id)
 
 
-async def _describe_image(data: bytes) -> str:
+async def _describe_image(data: bytes, session_id: str | None = None) -> str:
     """A detailed English description of an image, for regenerating it with a change."""
+    model = settings.get("model")
     response = await client.chat.complete_async(
-        model=settings.get("model"),
+        model=model,
         messages=[
             {
                 "role": "user",
@@ -215,6 +223,7 @@ async def _describe_image(data: bytes) -> str:
             }
         ],
     )
+    usage.record_response(model, response, session_id)
     choice = response.choices[0] if response.choices else None
     content = getattr(choice.message, "content", None) if choice else None
     return content if isinstance(content, str) else ""
@@ -299,16 +308,20 @@ async def _download_images(urls: list[str]) -> list[bytes]:
 
 
 async def _generate_images(
-    prompt: str, instructions: str = GENERATE_INSTRUCTIONS
+    prompt: str,
+    instructions: str = GENERATE_INSTRUCTIONS,
+    session_id: str | None = None,
 ) -> list[bytes]:
     """Run the hosted image_generation tool and download what it made."""
+    model = settings.get("tool_model")
     response = await client.beta.conversations.start_async(
-        model=settings.get("tool_model"),
+        model=model,
         instructions=instructions,
         inputs=prompt,
         tools=[{"type": "image_generation"}],
         store=False,
     )
+    usage.record_response(model, response, session_id)
     urls = _result_image_urls(response)
     if urls:
         return await _download_images(urls)
@@ -716,6 +729,7 @@ def build_agent() -> agents.Agent:
             show_style_guide,
         ],
         builtins=QUIET,
+        hooks=[usage.Meter(model=values["model"])],
         reasoning_effort=None if reasoning_effort == "none" else reasoning_effort,
         max_iterations=16,
     )
@@ -739,11 +753,13 @@ Report your findings as concise facts with numbers and dates, and list the URL o
 
 
 def build_research_agent() -> agents.Agent:
+    model = settings.get("model")
     return agents.Agent(
         name="debeloglav-research",
-        model=settings.get("model"),
+        model=model,
         instructions=RESEARCH_INSTRUCTIONS,
         tools=[web_search],
+        hooks=[usage.Meter(model=model)],
         # Subagents need programmatic tool calling: the lead starts them from code it writes.
         builtins=agents.Builtins(skills=False),
         max_iterations=30,
@@ -754,6 +770,7 @@ def build_research_agent() -> agents.Agent:
                 instructions=RESEARCHER_INSTRUCTIONS,
                 tools=[web_search],
                 builtins=QUIET,
+                hooks=[usage.Meter(model=model)],
                 max_iterations=12,
             )
         ],

@@ -24,7 +24,7 @@ class Setting:
     label: str
     help: str
     default: str
-    kind: str = "text"  # "text", "int", "choice", "textarea" or "timezone"
+    kind: str = "text"  # "text", "int", "choice", "textarea", "timezone" or "prices"
     choices: tuple[str, ...] = ()
     minimum: int | None = None
     maximum: int | None = None
@@ -69,6 +69,20 @@ SETTINGS = [
         "OCR model",
         "Reads PDF, Word and PowerPoint files.",
         "mistral-ocr-latest",
+    ),
+    Setting(
+        "model_prices",
+        "Models",
+        "Model prices",
+        "For the approximate cost on the Usage page. One model per line: its name, then the US "
+        "dollars per million input and output tokens, and optionally per million cached input "
+        "tokens (a tenth of the input price when left out). A model gets the price of the longest "
+        "name it starts with, so mistral-large also prices mistral-large-latest.",
+        "mistral-large-4 0.70 2.10\n"
+        "mistral-large 0.50 1.50\n"
+        "mistral-medium 1.50 7.50\n"
+        "mistral-small 0.15 0.60",
+        kind="prices",
     ),
     # Behaviour
     Setting(
@@ -232,6 +246,38 @@ BY_KEY = {setting.key: setting for setting in SETTINGS}
 GROUPS = list(dict.fromkeys(setting.group for setting in SETTINGS))
 
 
+@dataclass(frozen=True)
+class Price:
+    """What a model costs, in US dollars per million tokens."""
+
+    input: float
+    output: float
+    cached: float  # input tokens read from the cache
+
+
+def parse_prices(text: str) -> dict[str, Price]:
+    """The model_prices setting as a price per model name; raises ValueError on a bad line."""
+    prices: dict[str, Price] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        model, *numbers = line.split()
+        try:
+            values = [float(number.lstrip("$").replace(",", ".")) for number in numbers]
+        except ValueError:
+            values = []
+        if len(values) not in (2, 3) or not all(0 <= v < 1_000_000 for v in values):
+            raise ValueError(
+                f"model_prices: {line.strip()!r} must be a model name, then its input and output "
+                "price per million tokens (and optionally the cached input price), "
+                "e.g. mistral-large 0.50 1.50."
+            )
+        prices[model] = Price(
+            values[0], values[1], values[2] if len(values) == 3 else values[0] / 10
+        )
+    return prices
+
+
 def validate(key: str, value: str) -> str:
     """The value, normalized; raises ValueError when it is not valid for the setting."""
     setting = BY_KEY.get(key)
@@ -242,6 +288,9 @@ def validate(key: str, value: str) -> str:
     value = value.strip()
     if setting.kind == "textarea":
         return value
+    if setting.kind == "prices":
+        parse_prices(value)
+        return "\n".join(" ".join(line.split()) for line in value.splitlines() if line.strip())
     if not value:
         raise ValueError(f"{key} must not be empty.")
     if setting.kind == "choice" and value not in setting.choices:

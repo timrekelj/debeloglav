@@ -211,8 +211,13 @@ class Debeloglav(discord.Client):
                 session_id, state = await self.run_turn(
                     self.agent, session_id, request, content, trace=trace
                 )
-            except (agents.SessionTerminatedError, agents.SessionNotFoundError):
-                # The conversation's session ended: start over with the full context.
+            except (
+                agents.SessionTerminatedError,
+                agents.SessionNotFoundError,
+                agents.SessionConfigMismatchError,
+            ):
+                # The conversation's session ended, or was saved by a version of the bot whose
+                # agent had other tools or hooks: start over with the full context.
                 trace.step("session_restarted")
                 with trace.stage("context"):
                     content = await self.build_content(
@@ -313,6 +318,7 @@ class Debeloglav(discord.Client):
                     state = await session.run(content, on_event=trace.on_event)
         finally:
             lock.release()
+            trace.collect_usage(session.id)
         trace.finish(state)
         return session.id, state
 
@@ -494,6 +500,7 @@ class Debeloglav(discord.Client):
         finally:
             self.research_jobs -= 1
             if session is not None:
+                trace.collect_usage(session.id)
                 with suppress(Exception):
                     await session.cancel()
                 delete_journal(

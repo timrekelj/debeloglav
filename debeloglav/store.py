@@ -76,6 +76,15 @@ CREATE TABLE IF NOT EXISTS style_runs (
     error TEXT,
     skipped TEXT  -- JSON list of "#channel: why" for the channels left out
 );
+CREATE TABLE IF NOT EXISTS usage (
+    day TEXT NOT NULL,  -- local date, YYYY-MM-DD
+    model TEXT NOT NULL,
+    calls INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cached_tokens INTEGER NOT NULL,  -- the part of input_tokens that was read from the cache
+    output_tokens INTEGER NOT NULL,
+    PRIMARY KEY (day, model)
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -129,6 +138,16 @@ class Activity:
     error: str | None
     duration_ms: int | None
     trace: dict = field(default_factory=dict)
+
+
+@dataclass
+class Usage:
+    day: str  # local date, YYYY-MM-DD
+    model: str
+    calls: int
+    input_tokens: int
+    cached_tokens: int
+    output_tokens: int
 
 
 @dataclass
@@ -602,6 +621,39 @@ def style_runs(scope: str | None = None, limit: int = 50) -> list[StyleRun]:
     with _connect() as db:
         rows = db.execute(query, params).fetchall()
     return [_style_run(row) for row in rows]
+
+
+# --- Usage ---------------------------------------------------------------------------------------
+# The tokens every model call used, added up per day and model. Kept apart from the activity table,
+# which holds only the newest rows, so the totals stay complete.
+
+
+def add_usage(
+    day: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    calls: int = 1,
+) -> None:
+    with _connect() as db:
+        db.execute(
+            """INSERT INTO usage (day, model, calls, input_tokens, cached_tokens, output_tokens)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (day, model) DO UPDATE SET
+                 calls = calls + excluded.calls,
+                 input_tokens = input_tokens + excluded.input_tokens,
+                 cached_tokens = cached_tokens + excluded.cached_tokens,
+                 output_tokens = output_tokens + excluded.output_tokens""",
+            (day, model, calls, input_tokens, cached_tokens, output_tokens),
+        )
+
+
+def usage() -> list[Usage]:
+    """The usage of every day and model, newest day first."""
+    with _connect() as db:
+        rows = db.execute("SELECT * FROM usage ORDER BY day DESC, model").fetchall()
+    return [Usage(**row) for row in rows]
 
 
 # --- Settings ------------------------------------------------------------------------------------

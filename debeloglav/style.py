@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import discord
 from mistralai.client import models as api_models
 
-from . import blocked, settings, store
+from . import blocked, settings, store, usage
 from .agent import client
 from .mentions import who
 
@@ -164,8 +164,9 @@ def readable(channel: discord.TextChannel, who: discord.Member | discord.Role) -
 
 
 async def summarize(previous: str | None, transcript: str) -> str:
+    model = settings.get("model")
     response = await client.chat.complete_async(
-        model=settings.get("model"),
+        model=model,
         temperature=0.3,
         messages=[
             {"role": "system", "content": SUMMARIZER},
@@ -175,6 +176,7 @@ async def summarize(previous: str | None, transcript: str) -> str:
             },
         ],
     )
+    usage.record_response(model, response)
     content = response.choices[0].message.content
     if isinstance(content, list):  # skip the model's thinking chunks
         content = "".join(

@@ -3,7 +3,8 @@
 A Trace times the bot's own stages (reading the context, the agent's turn, sending the reply) and
 records every step of the turn from the Agents SDK's events: each model message, tool call and
 tool result, with the milliseconds since the request started. It is stored with the activity row
-as JSON, and the dashboard shows it as a timeline and exports it.
+as JSON, and the dashboard shows it as a timeline and exports it. It also carries the tokens the
+request's model calls used (debeloglav.usage).
 
 The steps of a subagent (a research job's researchers) carry an "agent" label, e.g. "researcher 2".
 """
@@ -16,6 +17,8 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from mistralai import agents
+
+from . import usage
 
 log = logging.getLogger("debeloglav.trace")
 
@@ -39,6 +42,7 @@ class Trace:
         self.stages: dict[str, int] = {}  # stage name -> milliseconds spent in it
         self.steps: list[dict[str, Any]] = []
         self.info: dict[str, Any] = {}
+        self.usage: dict[str, usage.Counts] = {}  # model -> the tokens its calls used
 
     def ms(self) -> int:
         return int((time.monotonic() - self.started) * 1000)
@@ -73,6 +77,11 @@ class Trace:
         if error:
             step["error"] = True
         self.steps.append(step)
+
+    def collect_usage(self, *session_ids: str) -> None:
+        """Add the tokens the sessions' model calls used since they were last collected."""
+        for model, counts in usage.take(*session_ids).items():
+            usage.add(self.usage, model, counts)
 
     def on_event(self, event: object, agent: str | None = None) -> None:
         """The Agents SDK's event handler for session.run(on_event=...). Never raises."""
@@ -185,6 +194,11 @@ class Trace:
             for task in (watcher, *followers):
                 task.cancel()
             await asyncio.gather(watcher, *followers, return_exceptions=True)
+            try:  # a subagent that came and went between two polls still used tokens
+                seen.update(child.id for child in await session.subagents())
+            except Exception:
+                log.debug("Could not list the subagents", exc_info=True)
+            self.collect_usage(*seen)
             # Who was still working when the lead stopped, e.g. at a timeout.
             for name, turns in running.items():
                 if turns > 0:
@@ -207,4 +221,7 @@ class Trace:
             }
 
     def as_dict(self) -> dict[str, Any]:
-        return {**self.info, "stages": self.stages, "steps": self.steps}
+        data = {**self.info, "stages": self.stages, "steps": self.steps}
+        if self.usage:
+            data["usage"] = self.usage
+        return data

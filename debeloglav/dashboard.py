@@ -31,7 +31,7 @@ from urllib.parse import urlencode, urlsplit
 import discord
 from aiohttp import web
 
-from . import agent, blocked, settings, store, style
+from . import agent, blocked, settings, store, style, usage
 from .context import timezone
 
 log = logging.getLogger("debeloglav.dashboard")
@@ -361,6 +361,7 @@ ICON_PATHS = {
     "/memories": "<path d='M6 3h12v18l-6-4-6 4z'/>",
     "/channels": "<path d='M9 3L7 21M17 3l-2 18M4 8h17M3 16h17'/>",
     "/tasks": "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>",
+    "/usage": "<path d='M4 20V10M10 20V4M16 20v-7M22 20H2'/>",
     "/settings": "<path d='M4 6h9M19 6h1M4 12h3M13 12h7M4 18h11M21 18h-1'/>"
     "<circle cx='16' cy='6' r='2.2'/><circle cx='10' cy='12' r='2.2'/><circle cx='18' cy='18' r='2.2'/>",
 }
@@ -373,6 +374,7 @@ NAV = [
     ("/memories", "Memories"),
     ("/channels", "Channels"),
     ("/tasks", "Tasks"),
+    ("/usage", "Usage"),
     ("/settings", "Settings"),
 ]
 
@@ -412,6 +414,13 @@ def duration(ms: int | None) -> str:
         return "<span class='faint'>—</span>"
     level = "err" if ms >= 2 * SLOW_MS else "warn" if ms >= SLOW_MS else ""
     return f"<span class='num dur {level}'>{e(fmt_ms(ms))}</span>"
+
+
+def fmt_cost(dollars: float | None) -> str:
+    """An approximate cost: $0.0042, $1.37, or a dash for a model without a price."""
+    if dollars is None:
+        return "—"
+    return f"${dollars:.4f}" if 0 < dollars < 0.1 else f"${dollars:,.2f}"
 
 
 def snippet(text: str | None, limit: int = 80) -> str:
@@ -911,6 +920,7 @@ def make_app(
     app.router.add_post("/channels/unblock", channel_unblock, name="channel_unblock")
     app.router.add_get("/tasks", tasks_page, name="tasks")
     app.router.add_post("/tasks/cancel", task_cancel, name="task_cancel")
+    app.router.add_get("/usage", usage_page, name="usage")
     app.router.add_get("/settings", settings_page, name="settings")
     app.router.add_post("/settings", settings_post, name="settings_post")
     return app
@@ -1073,6 +1083,8 @@ async def overview(request: web.Request) -> web.Response:
     uptime = timedelta(seconds=int(time.monotonic() - request.app[STARTED]))
     guilds = getattr(bot, "guilds", [])
 
+    today = f"{datetime.now(timezone()):%Y-%m-%d}"
+    used_today = usage_totals([row for row in store.usage() if row.day == today])
     stats = (
         "<div class='stats'>"
         + stat(len(last_day), "Requests, last 24 h")
@@ -1082,6 +1094,11 @@ async def overview(request: web.Request) -> web.Response:
         )
         + stat(
             fmt_ms(percentile(replies, 0.95)), "Slowest 5% of replies", "p95, last 24 h"
+        )
+        + stat(
+            fmt_cost(used_today["cost"]),
+            "Model cost, today",
+            f"{used_today['input_tokens'] + used_today['output_tokens']:,} tokens",
         )
         + stat(len(store.all_memories()), "Memories")
         + stat(len(store.all_tasks()), "Active tasks")
@@ -1366,6 +1383,21 @@ async def request_detail(request: web.Request) -> web.Response:
                 e(f"{t['prompt_chars']:,} characters · {t.get('images', 0)} images"),
             )
         )
+    if t.get("usage"):
+        prices = usage.prices()
+        details.append(
+            (
+                "Tokens",
+                "<br>".join(
+                    f"<code>{e(model)}</code> {counts.get('input_tokens', 0):,} in · "
+                    f"{counts.get('output_tokens', 0):,} out · "
+                    f"{counts.get('calls', 0)} calls · "
+                    f"{e(fmt_cost(usage.cost(model, counts, prices)))}"
+                    for model, counts in t["usage"].items()
+                ),
+            )
+        )
+        details.append(("Cost", e(f"about {fmt_cost(request_cost(t, prices))}")))
     if t.get("state"):
         end = t["state"] + (f" ({t['stop_reason']})" if t.get("stop_reason") else "")
         details.append(("Turn ended", e(end)))
@@ -1431,6 +1463,22 @@ async def request_detail(request: web.Request) -> web.Response:
         crumb="<a class='crumb' href='/requests'>← Requests</a>",
         actions=download(f"/requests/{a.id}/json", "Export JSON"),
     )
+
+
+def request_tokens(trace: dict, key: str) -> int | None:
+    """A request's tokens of one kind (input_tokens, output_tokens) over all its models."""
+    used = trace.get("usage")
+    return sum(counts.get(key, 0) for counts in used.values()) if used else None
+
+
+def request_cost(trace: dict, prices: dict[str, settings.Price]) -> float | None:
+    """What a request's tokens cost; None when it has no usage or none of its models has a price."""
+    costs = [
+        usage.cost(model, counts, prices)
+        for model, counts in trace.get("usage", {}).items()
+    ]
+    known = [cost for cost in costs if cost is not None]
+    return sum(known) if known else None
 
 
 def activity_or_404(request: web.Request) -> store.Activity:
@@ -1501,6 +1549,9 @@ CSV_COLUMNS = [
     *[f"{key}_ms" for key, _label in STAGES],
     "prompt_chars",
     "images",
+    "input_tokens",
+    "output_tokens",
+    "cost_usd",
     "session_id",
 ]
 
@@ -1511,8 +1562,10 @@ async def export_requests_csv(request: web.Request) -> web.Response:
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
+    prices = usage.prices()
     for a in rows:
         t = a.trace
+        cost = request_cost(t, prices)
         writer.writerow(
             {
                 **activity_json(bot, a),
@@ -1522,6 +1575,9 @@ async def export_requests_csv(request: web.Request) -> web.Response:
                 **{f"{key}_ms": t.get("stages", {}).get(key) for key, _label in STAGES},
                 "prompt_chars": t.get("prompt_chars"),
                 "images": t.get("images"),
+                "input_tokens": request_tokens(t, "input_tokens"),
+                "output_tokens": request_tokens(t, "output_tokens"),
+                "cost_usd": round(cost, 6) if cost is not None else None,
                 "session_id": t.get("session_id"),
             }
         )
@@ -1574,6 +1630,7 @@ async def export_all(request: web.Request) -> web.Response:
             {"scope": scope, **asdict(m)} for scope, m in store.all_memories_by_scope()
         ],
         "tasks": [asdict(t) for t in store.all_tasks()],
+        "usage": [asdict(row) for row in store.usage()],
         "blocked_channels": [
             {"guild_id": g, "channel_id": c, "channel": channel_name(bot, c)}
             for g, c in store.all_blocked_channels()
@@ -1922,6 +1979,128 @@ async def task_cancel(request: web.Request) -> web.Response:
     return redirect(data.get("next") or "/tasks")
 
 
+# --- Usage ---------------------------------------------------------------------------------------
+
+USAGE_PERIODS = [  # label, how many days back it reaches (None: everything)
+    ("Today", 1),
+    ("Last 7 days", 7),
+    ("Last 30 days", 30),
+    ("All time", None),
+]
+USAGE_DAYS = 30  # how many days the per-day table lists
+
+
+def usage_totals(rows: list[store.Usage]) -> dict:
+    """The rows added up: calls, tokens, and the cost of the models that have a price."""
+    prices = usage.prices()
+    total: dict = {
+        "calls": 0,
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0,
+        "cost": 0.0,
+        "unpriced": set(),  # the models left out of the cost
+    }
+    for row in rows:
+        counts = asdict(row)
+        for key in ("calls", "input_tokens", "cached_tokens", "output_tokens"):
+            total[key] += counts[key]
+        cost = usage.cost(row.model, counts, prices)
+        if cost is None:
+            total["unpriced"].add(row.model)
+        else:
+            total["cost"] += cost
+    return total
+
+
+def usage_cells(total: dict) -> str:
+    # A dash, not $0.00, when none of the models has a price.
+    cost = None if total["unpriced"] and not total["cost"] else total["cost"]
+    return (
+        f"<td class='right num'>{total['calls']:,}</td>"
+        f"<td class='right num'>{total['input_tokens']:,}</td>"
+        f"<td class='right num'>{total['cached_tokens']:,}</td>"
+        f"<td class='right num'>{total['output_tokens']:,}</td>"
+        f"<td class='right num'>{e(fmt_cost(cost))}</td>"
+    )
+
+
+async def usage_page(request: web.Request) -> web.Response:
+    rows = store.usage()
+    today = datetime.now(timezone()).date()
+
+    def since(days: int | None) -> list[store.Usage]:
+        if days is None:
+            return rows
+        first = f"{today - timedelta(days=days - 1):%Y-%m-%d}"
+        return [row for row in rows if row.day >= first]
+
+    stats = "<div class='stats'>"
+    for label, days in USAGE_PERIODS:
+        total = usage_totals(since(days))
+        stats += stat(
+            fmt_cost(total["cost"]),
+            label,
+            f"{total['input_tokens'] + total['output_tokens']:,} tokens · {total['calls']:,} calls",
+        )
+    stats += "</div>"
+
+    prices = usage.prices()
+    month = since(30)
+    model_rows = []
+    for model in sorted({row.model for row in month}):
+        price = usage.price_of(model, prices)
+        price_html = (
+            f"${price.input:g} in · ${price.output:g} out"
+            if price
+            else "<a href='/settings#model_prices'>no price set</a>"
+        )
+        model_rows.append(
+            f"<tr><td><code>{e(model)}</code><span class='sub'>{price_html}</span></td>"
+            f"{usage_cells(usage_totals([row for row in month if row.model == model]))}</tr>"
+        )
+    headers = ["Calls>", "Input tokens>", "Of that cached>", "Output tokens>", "Cost>"]
+    day_rows = [
+        f"<tr><td class='num'>{e(day)}</td>"
+        f"{usage_cells(usage_totals([row for row in rows if row.day == day]))}</tr>"
+        for day in sorted({row.day for row in rows}, reverse=True)[:USAGE_DAYS]
+    ]
+    unpriced = sorted(usage_totals(rows)["unpriced"])
+    note = (
+        "<p class='note'>The cost is approximate: the tokens times the "
+        "<a href='/settings#model_prices'>model prices</a> in the settings, at today's prices. "
+        "Transcription, OCR, and the per-call fees of web search and image generation are not "
+        "billed by the token and are not included."
+        + (
+            f" No price is set for <code>{e(', '.join(unpriced))}</code>, so its tokens are "
+            "counted but not its cost."
+            if unpriced
+            else ""
+        )
+        + "</p>"
+    )
+    body = (
+        stats
+        + note
+        + card(
+            "Per model <small>last 30 days</small>",
+            table(["Model", *headers], model_rows, "No model calls recorded yet."),
+            flush=True,
+        )
+        + card(
+            f"Per day <small>last {USAGE_DAYS} days with usage · {e(timezone().key)}</small>",
+            table(["Day", *headers], day_rows, "No model calls recorded yet."),
+            flush=True,
+        )
+    )
+    return page(
+        "Usage",
+        body,
+        current="/usage",
+        subtitle="The tokens the models used and roughly what they cost.",
+    )
+
+
 # --- Settings ------------------------------------------------------------------------------------
 
 
@@ -1934,7 +2113,7 @@ def setting_field(setting: settings.Setting, value: str) -> str:
             for v in setting.choices
         )
         return f"<select name='value'>{options}</select>"
-    if setting.kind == "textarea":
+    if setting.kind in ("textarea", "prices"):
         return f"<textarea name='value'>{e(value)}</textarea>"
     if setting.kind == "int":
         limits = "".join(
@@ -1966,7 +2145,7 @@ async def settings_page(request: web.Request) -> web.Response:
             buttons = "<button type='submit' class='primary'>Save</button>" + reset
             form_body = (
                 f"{field}<div class='btn-row'>{buttons}</div>"
-                if s.kind == "textarea"
+                if s.kind in ("textarea", "prices")
                 else f"<div class='field-row'>{field}{buttons}</div>"
             )
             rows.append(

@@ -70,6 +70,8 @@ It shows what the bot is doing — recent requests with their full prompts and r
 
 Every request is traced: how long each stage took (reading the context, the agent's turn, sending the reply), and every step of the turn with its time — each tool call and result, when the model started writing — plus the model and reasoning effort it ran with. A request's page shows this as a timeline, so a slow reply shows whether the time went to the model thinking, a tool, or Discord. The overview shows the median and p95 reply time, the average split per stage and the tools' timings. Export buttons download one request as JSON, the request list as JSON or CSV, the learning history, or everything at once (`/export/all.json`).
 
+The Usage page shows the tokens the models used and roughly what they cost: today, the last 7 and 30 days and all time, per model and per day. A request's page shows its own tokens and cost. The cost is the tokens times the *Model prices* setting (US dollars per million input, output and cached input tokens, one model per line), computed when the page is shown, so a corrected price also re-prices the past. It is an estimate: check the prices against [Mistral's pricing](https://docs.mistral.ai/inference/pricing), and note that transcription, OCR and the per-call fees of web search and image generation are not billed by the token and are not included. Usage is counted from the release that added the page; earlier requests have none.
+
 Every setting of the bot is changed on the Settings page, and only there: the models and reasoning effort, extra instructions, context messages, video frames, the thinking emote, the time zone, the conversation timeout, threads (on/off and when they archive), the research, memory and task limits, and how often and from how many messages the style is learned. They are not read from `.env`. A changed value is stored in SQLite and takes effect with the next message, no restart; *Reset to default* goes back to the built-in default. It is the only place to change server settings; the bot has no admin slash commands. Blocked channels (a channel, or a whole category) are stored in SQLite, per server, and the bot stops reading them everywhere: messages, history search, catch-up and style learning. Code: `debeloglav/dashboard.py`.
 
 ## How it works
@@ -81,6 +83,7 @@ Every setting of the bot is changed on the Settings page, and only there: the mo
 - `debeloglav/scheduler.py`: the loop that runs due tasks. `debeloglav/store.py`: SQLite for memories and tasks.
 - `debeloglav/settings.py`: every setting, with its default and limits; the values changed in the dashboard live in SQLite.
 - `debeloglav/trace.py`: times each request's stages and records the steps of its turn from the Agents SDK's events, for the dashboard.
+- `debeloglav/usage.py`: counts the tokens of every model call (the agents' through a hook, the bot's own API calls from their responses) into per-day totals in SQLite, and prices them for the dashboard.
 - `debeloglav/context.py`: which Discord server, channel and person each running session acts for. Tools read it through their `ToolCallbackContext`; the model never sees it.
 - `debeloglav/bot.py`: the Discord side. Decides when it's summoned, gathers context (reply chain, recent messages, attachments), runs the agent, and replies.
 

@@ -12,8 +12,9 @@ import pytest
 from aiohttp import ClientResponse
 from aiohttp.test_utils import TestClient, TestServer
 
-from debeloglav import blocked, dashboard, store
+from debeloglav import blocked, dashboard, settings, store
 from debeloglav.agent import update_setting
+from debeloglav.context import timezone
 
 PASSWORD = "geslo-123"
 
@@ -97,6 +98,7 @@ def clean_tables(monkeypatch):
             "blocked_channels",
             "settings",
             "conversations",
+            "usage",
         ):
             db.execute(f"DELETE FROM {table}")
     monkeypatch.setattr(blocked, "_db_blocked", set())
@@ -275,6 +277,7 @@ async def test_unauthenticated_requests_redirect_to_login(client):
         "/memories",
         "/channels",
         "/tasks",
+        "/usage",
         "/settings",
     ):
         response = await client.get(path, allow_redirects=False)
@@ -671,6 +674,7 @@ async def test_every_page_renders_with_seeded_data(logged_in):
         "/memories": ["guild:1", "Tim je admin", "Tim (@tim)", "Add a memory"],
         "/channels": ["memes", "Unblock", "Block a channel or category", "Kategorija"],
         "/tasks": ["Spomni me jutri", "Tim (@tim)", "Cancel"],
+        "/usage": ["All time", "Per model", "model prices"],
         "/settings": [
             "reasoning_effort",
             "model",
@@ -1027,3 +1031,60 @@ async def test_every_setting_is_on_the_settings_page_and_validated(logged_in):
     )
     assert response.headers["Location"] == "/settings#context_messages"
     assert store.get_setting("context_messages") == "4"
+
+
+# --- Usage ---------------------------------------------------------------------------------------
+
+
+async def test_usage_page_shows_tokens_and_cost(logged_in):
+    settings.update("model_prices", "mistral-large-4 1 2")
+    store.add_usage(f"{datetime.now(timezone()):%Y-%m-%d}", "mistral-large-4", 2_000_000, 500_000, calls=12)
+    store.add_usage("2020-01-01", "mistral-large-4", 1_000_000, 0)
+    store.add_usage(f"{datetime.now(timezone()):%Y-%m-%d}", "mystery-model", 1234, 5)
+    text = await (await logged_in.get("/usage")).text()
+    for needle in (
+        "$3.00",  # today
+        "$4.00",  # all time
+        "2,001,234",
+        "2020-01-01",
+        "mystery-model",
+        "no price set",
+        "$1 in · $2 out",
+    ):
+        assert needle in text, needle
+    text = await (await logged_in.get("/")).text()
+    assert "Model cost, today" in text and "$3.00" in text
+
+
+async def test_usage_page_renders_empty(logged_in):
+    text = await (await logged_in.get("/usage")).text()
+    assert "No model calls recorded yet." in text and "$0.00" in text
+
+
+async def test_request_detail_and_exports_show_the_usage(logged_in):
+    settings.update("model_prices", "mistral-large-4 1 2")
+    store.log_activity(
+        kind="reply",
+        scope="guild:7",  # not a server another test file reads the requests of
+        question="Kako si?",
+        trace={
+            "usage": {
+                "mistral-large-4": {
+                    "calls": 3,
+                    "input_tokens": 40_000,
+                    "cached_tokens": 0,
+                    "output_tokens": 5_000,
+                },
+                "mystery-model": {"calls": 1, "input_tokens": 9, "output_tokens": 1},
+            }
+        },
+    )
+    activity_id = store.recent_activity(1)[0].id
+    text = await (await logged_in.get(f"/requests/{activity_id}")).text()
+    for needle in ("40,000 in", "5,000 out", "3 calls", "about $0.0500", "mystery-model"):
+        assert needle in text, needle
+    csv_text = await (await logged_in.get("/export/requests.csv")).text()
+    assert "input_tokens" in csv_text and ",40009,5001,0.05," in csv_text
+    store.add_usage(f"{datetime.now(timezone()):%Y-%m-%d}", "mistral-large-4", 10, 5)
+    data = await (await logged_in.get("/export/all.json")).json(content_type=None)
+    assert data["usage"][0]["input_tokens"] == 10
