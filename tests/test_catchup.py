@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import discord
 import pytest
 from mistralai import agents
 
@@ -324,7 +325,8 @@ async def test_an_open_poll_shows_until_when_in_local_time():
     bot, _ = setup([message(105, luka, poll=p)])
     result = await catchup.catch_up(bot, request(message_id=None))
     assert (
-        f"open until {expiry.astimezone(timezone()):%Y-%m-%d %H:%M}" in result["messages"]
+        f"open until {expiry.astimezone(timezone()):%Y-%m-%d %H:%M}"
+        in result["messages"]
     )
 
 
@@ -507,3 +509,23 @@ async def test_a_private_thread_of_the_asking_channel_raises():
 
 def test_the_hook_is_unset_until_the_bot_sets_it():
     assert context.catch_up is None
+
+
+async def test_a_forum_raises_a_tool_error():
+    bot, _ = setup([])
+    forum = SimpleNamespace(id=20, name="ideje")  # a forum has no history of its own
+    bot.guild.channels[20] = forum
+    with pytest.raises(agents.ToolError, match="no messages of its own"):
+        await catchup.catch_up(bot, request(channel_id=20))
+
+
+async def test_an_asker_who_left_the_server_raises_a_tool_error():
+    bot, _ = setup([])
+    del bot.guild.members[ASKER]
+
+    async def gone(user_id):
+        raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "gone")
+
+    bot.guild.fetch_member = gone
+    with pytest.raises(agents.ToolError, match="can't find the person asking"):
+        await catchup.catch_up(bot, request())

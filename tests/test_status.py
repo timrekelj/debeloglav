@@ -4,11 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 from mistralai import agents
+from test_search import ASKER, GUILD_ID, FakeChannel, FakeGuild, person
 
 from debeloglav import status, store
 from debeloglav.context import Request
-
-from test_search import ASKER, GUILD_ID, FakeChannel, FakeGuild, person
 
 SCOPE = f"guild:{GUILD_ID}"
 PUBLIC, SECRET = 10, 20

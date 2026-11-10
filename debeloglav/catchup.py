@@ -24,9 +24,7 @@ async def catch_up(
     guild = bot.get_guild(int(request.scope.removeprefix("guild:")))
     if guild is None:
         raise agents.ToolError("I can't find this server.")
-    asker = guild.get_member(request.user_id) or await guild.fetch_member(
-        request.user_id
-    )
+    asker = await discord_search.asker_of(guild, request)
     if channel:
         place = discord_search.find_channel(guild, channel)
     else:
@@ -38,6 +36,11 @@ async def catch_up(
                 place = await bot.fetch_channel(request.channel_id)
             except discord.HTTPException:
                 raise agents.ToolError("I can't find this channel.") from None
+    if not hasattr(place, "history"):
+        # A forum (or category) has no messages of its own, only threads.
+        raise agents.ToolError(
+            f"#{place.name} has no messages of its own. Ask which of its posts (threads) to read."
+        )
     if blocked.channel(place) or not discord_search.readable(place, asker):
         raise agents.ToolError(f"#{place.name} is not a channel you can read.")
     if not discord_search.shareable(guild, place, request):

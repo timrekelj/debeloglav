@@ -38,9 +38,7 @@ async def search(
     guild = bot.get_guild(int(request.scope.removeprefix("guild:")))
     if guild is None:
         raise agents.ToolError("I can't find this server.")
-    asker = guild.get_member(request.user_id) or await guild.fetch_member(
-        request.user_id
-    )
+    asker = await asker_of(guild, request)
 
     params: list[tuple[str, str]] = [
         ("limit", str(MAX_RESULTS)),
@@ -105,9 +103,7 @@ async def search(
                 "channel": f"#{place.name}",
                 "time": f"{sent:%Y-%m-%d %H:%M}",
                 "content": readable_content(guild, message)[:MAX_CHARS],
-                "attachments": [
-                    a["filename"] for a in message.get("attachments", [])
-                ],
+                "attachments": [a["filename"] for a in message.get("attachments", [])],
                 "link": f"https://discord.com/channels/{guild.id}/{message['channel_id']}/{message['id']}",
             }
             if poll := message.get("poll"):
@@ -121,10 +117,25 @@ async def search(
     }
 
 
+async def asker_of(guild: discord.Guild, request: Request) -> discord.Member:
+    """The member who asked; a ToolError when they are no longer in the server."""
+    member = guild.get_member(request.user_id)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(request.user_id)
+    except discord.HTTPException:
+        raise agents.ToolError(
+            "I can't find the person asking in this server."
+        ) from None
+
+
 def readable_content(guild: discord.Guild, message: dict) -> str:
     """The message text with <@id>, <@&id> and <#id> written as names, like Discord shows them."""
     users = {
-        int(u["id"]): u.get("member", {}).get("nick") or u.get("global_name") or u["username"]
+        int(u["id"]): u.get("member", {}).get("nick")
+        or u.get("global_name")
+        or u["username"]
         for u in message.get("mentions", [])
     }
 
@@ -165,7 +176,9 @@ def shareable(
     if place.id == request.channel_id:
         return True
     # A public thread of the channel the answer is posted in is readable wherever that channel is.
-    if getattr(place, "parent_id", None) == request.channel_id and not _private_thread(place):
+    if getattr(place, "parent_id", None) == request.channel_id and not _private_thread(
+        place
+    ):
         return True
     return readable(place, guild.default_role)
 

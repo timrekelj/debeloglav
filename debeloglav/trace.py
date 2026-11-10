@@ -155,6 +155,7 @@ class Trace:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                log.warning("Lost the events of %s", name, exc_info=True)
                 self.step(
                     "notice", name="error", detail=f"Lost the events: {e}", agent=name
                 )

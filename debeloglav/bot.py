@@ -610,11 +610,14 @@ class Debeloglav(discord.Client):
         )
         sent_prompt = prompt_text(content)
         reply = parse(state, session_id)
-        if reply is not None and reply.text.startswith(NO_REPLY):
+        if reply is None or reply.text.startswith(NO_REPLY):
             await self.end_session(session_id)
+            if reply is None:
+                # Nothing is posted: a failing watch would otherwise post an error at every run.
+                raise RuntimeError(f"the turn did not complete: {type(state).__name__}")
             return sent_prompt, NO_REPLY
         text, files = await render(reply)
-        if task.watch and reply is not None:
+        if task.watch:
             store.set_last_report(task.id, reply.text)
 
         text = await mentions.untag(getattr(channel, "guild", None), text)

@@ -170,3 +170,30 @@ async def test_the_threads_starter_message_is_fetched_from_its_channel():
     assert await bot.thread_starter(msg) is starter
     parent.fetch_message.assert_awaited_once_with(3)
     assert await bot.thread_starter(message(text_channel())) is None
+
+
+async def test_a_scheduled_run_that_fails_posts_nothing(client, monkeypatch):
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    monkeypatch.setattr(client, "channel", AsyncMock(return_value=channel))
+    monkeypatch.setattr(
+        client, "run_turn", AsyncMock(return_value=("ses_x", SimpleNamespace()))
+    )
+    monkeypatch.setattr(client, "end_session", AsyncMock())
+    task = store.Task(
+        id=1,
+        scope="guild:1",
+        channel_id=2,
+        user_id=3,
+        user_name="@tim",
+        prompt="Preveri novice",
+        cron="0 * * * *",
+        next_run=None,
+        watch=True,
+        mention=True,
+        last_report=None,
+    )
+    with pytest.raises(RuntimeError, match="did not complete"):
+        await client.run_scheduled_task(task)
+    channel.send.assert_not_awaited()
+    client.end_session.assert_awaited_once_with("ses_x")
