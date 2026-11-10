@@ -721,7 +721,9 @@ def build_agent() -> agents.Agent:
 RESEARCH_INSTRUCTIONS = """You are Debeloglav's research lead. You get one research question and produce a thorough, well-sourced report.
 
 1. Split the question into 2 to 5 independent sub-questions that together cover it.
-2. Start one researcher subagent per sub-question, all at once, each with a precise task.
+2. Start one researcher subagent per sub-question, all at once, each with a precise task. Start each with exactly
+   tools.agents.spawn(name="researcher-1", config_name="researcher", message="<the sub-question and what to find>")
+   name, message and config_name are all required: the task goes in message (not task, prompt or question), and each researcher gets its own name. The researcher config exists already: don't call list_configs.
 3. Wait for every researcher's result before you write anything.
 4. If something important is missing or contradictory, run web_search yourself or start another researcher.
 5. Write the report: a short direct answer first, then the findings, organised with headings and bullet points, then caveats or open questions. Point out where sources disagree.
