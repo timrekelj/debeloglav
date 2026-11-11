@@ -14,6 +14,7 @@ Built with [`mistralai-agents`](https://docs.mistral.ai/studio/agents/getting-st
 - Send or reply to a **video**: it samples frames with ffmpeg and transcribes the sound (Mistral Large 4 has no native video input), then answers about both.
 - It reads **polls** wherever it reads messages: the question, each answer with its vote count, and whether the poll ended.
 - `@Debeloglav nariši mačko v ljubljanski kavarni` → it **generates an image** (Mistral's `image_generation` tool) and attaches it to the reply.
+- `@Debeloglav nariši graf kvadratnih števil do 20` → it **runs Python** (Mistral's hosted `code_interpreter` tool, nothing runs on the bot's machine) to make charts and plots with matplotlib, or to calculate and crunch data, and attaches up to 4 resulting images to the reply.
 - It reads the reply thread and the last few channel messages for context.
 - **Threads:** tagged in a channel, it opens a thread on your message (named after the question) and answers there, so conversations don't clutter the channel. In its own threads it answers every message, no tag needed; in threads someone else opened it answers only tags and replies to its messages. Inside a thread, in a DM, or where it may not open a thread, it replies inline. Threads are archived after 24 idle hours. Both can be changed, or threads switched off, in the dashboard.
 - In DMs it answers every message.
@@ -79,6 +80,7 @@ Every setting of the bot is changed on the Settings page, and only there: the mo
 
 - `debeloglav/agent.py`: the agent. `agents.Agent(model="mistral-large-4", tools=[web_search, ...])`. The `web_search` tool calls Mistral's hosted `web_search` through the Conversations API (the pattern the Agents SDK docs recommend) and returns a summary with source URLs. The agent answers in plain text; the sources its searches found are recorded by the tool and listed under the reply.
 - `debeloglav/agent.py` also has `generate_image`, which calls the hosted `image_generation` tool, downloads the image from the URL the tool returns, and records the bytes. The bot attaches them to the reply. `edit_image` edits one of the turn's images the same way: it uploads the image, passes its signed URL to the tool, and accepts the result only if the tool really used that URL; otherwise it describes the image with the vision model, regenerates it with the change, and the reply notes it is a new version, not an edit.
+- `debeloglav/agent.py` also has `run_python`, which sends the model's code to the hosted `code_interpreter` tool (same Conversations API wrapper), returns the printed output to the model, and records the PNG/JPEG files the run produced (at most 4) as reply attachments.
 - `debeloglav/agent.py` also has the memory, scheduling and research tools, and the research agent (`build_research_agent`) with its `researcher` subagent.
 - `debeloglav/media.py`: Voxtral transcription, and ffmpeg frame and audio extraction for videos.
 - `debeloglav/scheduler.py`: the loop that runs due tasks. `debeloglav/store.py`: SQLite for memories and tasks.

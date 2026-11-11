@@ -336,6 +336,71 @@ async def _generate_images(
     return images or await _download_images(_message_image_urls(response))
 
 
+# --- Code --------------------------------------------------------------------------------------
+
+
+PYTHON_INSTRUCTIONS = (
+    "Run the Python code the user gives you EXACTLY as written, ONCE, with the code interpreter. "
+    "Do not rewrite, fix or improve it, and do not ask questions."
+)
+PYTHON_OUTPUT_LIMIT = 4000
+MAX_CODE_IMAGES = 4
+IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
+
+
+@agents.tool(model_access="direct")
+async def run_python(
+    ctx: agents.ToolCallbackContext, /, code: str
+) -> dict[str, object]:
+    """Run Python code in a sandbox, for charts, plots, calculations and data crunching.
+    Returns what the code printed (or its error) and how many images were attached to your reply
+    automatically; keep the text short, and don't paste the code unless asked.
+
+    code: a complete, self-contained script (no internet, no files from the user). Plots: use matplotlib
+    and call plt.show() once at the end, which attaches every open figure. Don't set the backend
+    (matplotlib.use) and don't also savefig() the same figure: that attaches it twice. Print the results
+    you need to read, e.g. numbers.
+    """
+    model = settings.get("tool_model")
+    response = await client.beta.conversations.start_async(
+        model=model,
+        instructions=PYTHON_INSTRUCTIONS,
+        inputs=f"```python\n{code}\n```",
+        tools=[{"type": "code_interpreter"}],
+        store=False,
+    )
+    usage.record_response(model, response, ctx.session.id)
+    entries = _tool_execution_entries(response, "code_interpreter")
+    if not entries:
+        raise agents.ToolError("The code did not run.")
+    info = getattr(entries[-1], "info", None) or {}
+    output = info.get("code_output")
+    if not isinstance(output, str):
+        output = "".join(
+            part.get("text", "")
+            for part in info.get("result") or []
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    output = output.strip()
+    if len(output) > PYTHON_OUTPUT_LIMIT:
+        output = output[:PYTHON_OUTPUT_LIMIT] + "\n[output cut off]"
+
+    attached = 0
+    for file_id in dict.fromkeys(_tool_file_ids(response)):
+        if attached == MAX_CODE_IMAGES:
+            break
+        try:
+            download = await client.files.download_async(file_id=file_id)
+            data = await download.aread()
+        except Exception:
+            log.exception("Could not download the code interpreter file %s", file_id)
+            continue
+        if data.startswith(IMAGE_MAGIC):
+            context.record(ctx, image=data)
+            attached += 1
+    return {"output": output or "(no output)", "images_attached": attached}
+
+
 # --- Memory ------------------------------------------------------------------------------------
 
 
@@ -639,6 +704,7 @@ How to behave:
 - People can send you images, voice messages, videos and documents. You see images and sampled video frames directly; voice messages and video sound come to you as transcripts, and documents (PDF, Word, PowerPoint, text and code files) as their text.
 - When someone asks you to draw, generate, create or imagine an image, call generate_image with a detailed English description; the image is attached to your reply automatically. Keep the text answer short then.
 - When someone asks to change, edit or modify an image they sent or replied to ("dodaj mu klobuk", "naredi v anime stilu", "odstrani ozadje"), call edit_image with the image's number from the "Images you can edit with edit_image" list and a detailed English instruction — not generate_image. For a brand new picture, call generate_image. If edit_image reports a new version instead of an edit, say it is a new version, not an edit.
+- You can run Python with run_python: use it for charts, plots and graphs, and for calculations or data crunching that benefit from real code. A chart is made with matplotlib via run_python, never with generate_image. End the plot code with plt.show() (no matplotlib.use, no savefig); the figures are attached to your reply automatically. Keep the text short and don't paste the code unless asked. Never claim that you can't run code.
 - People are shown as "Nickname (@username)". Nicknames change; the @username stays the same. Know people by their @username: the same @username is the same person, even under a new nickname. Call people by their current nickname.
 - When you talk about someone, write their nickname as plain text, without @ and without "(@username)".
 - You can't tag or ping anyone: no people, roles, @everyone or @here. If someone asks you to, say that you don't tag.
@@ -717,6 +783,7 @@ def build_agent() -> agents.Agent:
             web_search,
             generate_image,
             edit_image,
+            run_python,
             remember,
             forget_memory,
             schedule_task,
