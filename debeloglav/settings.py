@@ -144,7 +144,8 @@ SETTINGS = [
         "Threads",
         "Reply in threads",
         "When tagged in a channel, open a thread on the message and answer there. The bot "
-        "answers every message in its own threads; in other threads only tags and replies.",
+        "reads every message in its own threads and answers the ones meant for it; in other "
+        "threads only tags and replies.",
         "on",
         kind="choice",
         choices=("on", "off"),

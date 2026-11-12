@@ -168,6 +168,7 @@ class Debeloglav(discord.Client):
             return  # the bot doesn't read these channels at all
         if message.author.bot or not self.is_summoned(message):
             return
+        addressed = self.is_addressed(message)
         parent_id = message.reference.message_id if message.reference else None
         session_id = self.conversations.get(parent_id)
         if session_id is None and isinstance(message.channel, discord.Thread):
@@ -202,10 +203,14 @@ class Debeloglav(discord.Client):
         started = time.monotonic()
         content: list[dict[str, str]] | None = None
         error: str | None = None
+        silent = False
         try:
             with trace.stage("context"):
                 content = await self.build_content(
-                    message, request, continuing=session_id is not None
+                    message,
+                    request,
+                    continuing=session_id is not None,
+                    addressed=addressed,
                 )
             try:
                 session_id, state = await self.run_turn(
@@ -221,13 +226,24 @@ class Debeloglav(discord.Client):
                 trace.step("session_restarted")
                 with trace.stage("context"):
                     content = await self.build_content(
-                        message, request, continuing=False
+                        message, request, continuing=False, addressed=addressed
                     )
                 session_id, state = await self.run_turn(
                     self.agent, None, request, content, trace=trace
                 )
             with trace.stage("render"):
-                text, files = await render(parse(state, session_id))
+                answer = parse(state, session_id)
+                # An untagged message in the bot's own thread may not be meant for it.
+                silent = (
+                    not addressed
+                    and answer is not None
+                    and answer.text.startswith(NO_REPLY)
+                    and not answer.found.images
+                )
+                if silent:
+                    text, files = NO_REPLY, []
+                else:
+                    text, files = await render(answer)
         except Exception as e:
             log.exception("Failed to answer %s", message.jump_url)
             error = f"{type(e).__name__}: {e}"
@@ -236,9 +252,11 @@ class Debeloglav(discord.Client):
             with trace.stage("unreact"):
                 await unreact(message, thinking, self.user)
 
-        with trace.stage("send"):
-            text = await mentions.untag(message.guild, text)
-            sent = await reply_chunks(message, text, files, place=thread)
+        sent: list[discord.Message] = []
+        if not silent:
+            with trace.stage("send"):
+                text = await mentions.untag(message.guild, text)
+                sent = await reply_chunks(message, text, files, place=thread)
         trace.info.update(
             session_id=session_id,
             reply_messages=len(sent),
@@ -324,11 +342,16 @@ class Debeloglav(discord.Client):
 
     def is_summoned(self, message: discord.Message) -> bool:
         assert self.user is not None
-        if message.guild is None:
-            return True  # DMs always get an answer
         channel = message.channel
         if isinstance(channel, discord.Thread) and channel.owner_id == self.user.id:
-            return True  # every message in a thread the bot opened is for it
+            return True  # the bot reads every message in a thread it opened
+        return self.is_addressed(message)
+
+    def is_addressed(self, message: discord.Message) -> bool:
+        """Whether the message is explicitly for the bot: a DM, a tag, or a reply to it."""
+        assert self.user is not None
+        if message.guild is None:
+            return True  # DMs always get an answer
         if self.user in message.mentions:
             return True
         reference = message.reference
@@ -381,7 +404,12 @@ class Debeloglav(discord.Client):
             return None
 
     async def build_content(
-        self, message: discord.Message, request: Request, *, continuing: bool
+        self,
+        message: discord.Message,
+        request: Request,
+        *,
+        continuing: bool,
+        addressed: bool = True,
     ) -> list[dict[str, str]]:
         sections = [
             now_line(),
@@ -414,7 +442,14 @@ class Debeloglav(discord.Client):
                     "The tagged message replies to this thread (oldest first):\n"
                     + "\n".join(map(describe, chain))
                 )
-        sections.append("Message that tagged you:\n" + describe(message))
+        if addressed:
+            header = "Message that tagged you:\n"
+        else:
+            header = (
+                "New message in your thread. Nobody tagged you: it may be meant for you or for "
+                f"someone else in the thread. If it is not directed at you, answer exactly {NO_REPLY}.\n"
+            )
+        sections.append(header + describe(message))
         mentioned = [u for u in message.mentions if u != self.user]
         if mentioned:
             sections.append(

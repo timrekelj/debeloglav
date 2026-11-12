@@ -197,3 +197,135 @@ async def test_a_scheduled_run_that_fails_posts_nothing(client, monkeypatch):
         await client.run_scheduled_task(task)
     channel.send.assert_not_awaited()
     client.end_session.assert_awaited_once_with("ses_x")
+
+
+# --- untagged messages in the bot's own threads --------------------------------------------------
+
+
+def own_thread(monkeypatch):
+    me = SimpleNamespace(id=999)
+    monkeypatch.setattr(bot.Debeloglav, "user", me)
+    thread = MagicMock(spec=discord.Thread)
+    thread.owner_id = 999
+    thread.id = 50
+    return me, thread
+
+
+def thread_message(thread, mentions=(), reference=None, guild=True):
+    msg = MagicMock()
+    msg.guild = SimpleNamespace(id=1) if guild else None
+    msg.channel = thread
+    msg.mentions = list(mentions)
+    msg.reference = reference
+    msg.role_mentions = []
+    return msg
+
+
+def test_an_untagged_message_in_the_bots_thread_is_not_addressed(client, monkeypatch):
+    me, thread = own_thread(monkeypatch)
+    plain = thread_message(thread)
+    assert client.is_summoned(plain)
+    assert not client.is_addressed(plain)
+    assert client.is_addressed(thread_message(thread, mentions=[me]))
+    assert client.is_addressed(thread_message(thread, guild=False))
+    reply = MagicMock(spec=discord.MessageReference)
+    reply.resolved = MagicMock(spec=discord.Message)
+    reply.resolved.author = me
+    assert client.is_addressed(thread_message(thread, reference=reply))
+
+
+async def build(addressed):
+    author = SimpleNamespace(id=2, name="luka", display_name="Luka")
+    msg = SimpleNamespace(
+        id=10,
+        author=author,
+        clean_content="a ti?",
+        attachments=[],
+        reference=None,
+        mentions=[],
+        embeds=[],
+        poll=None,
+        channel=SimpleNamespace(id=1),
+    )
+    request = bot.Request(scope="dm:2", channel_id=1, user_id=2, user_name="Luka")
+    content = await bot.Debeloglav.build_content(
+        SimpleNamespace(user=None),
+        msg,
+        request,
+        continuing=True,
+        addressed=addressed,
+    )
+    return content[0]["text"]
+
+
+async def test_build_content_marks_an_untagged_message():
+    tagged = await build(True)
+    assert "Message that tagged you:" in tagged
+    assert bot.NO_REPLY not in tagged
+    untagged = await build(False)
+    assert "Message that tagged you:" not in untagged
+    assert "Nobody tagged you" in untagged
+    assert f"answer exactly {bot.NO_REPLY}" in untagged
+    assert "a ti?" in untagged
+
+
+def answer_turn(client, monkeypatch, text, mentions=()):
+    """on_message for a message in the bot's own thread, with the turn answering `text`."""
+    me, thread = own_thread(monkeypatch)
+    msg = thread_message(thread, mentions=[me] if mentions else [])
+    msg.id = 77
+    msg.author = SimpleNamespace(id=2, bot=False)
+    msg.clean_content = "hej"
+    msg.jump_url = "https://discord.com/channels/1/2/77"
+    msg.attachments = []
+    client.conversations = MagicMock()
+    client.conversations.get.return_value = "ses_1"
+    client.build_content = AsyncMock(return_value=[{"type": "text", "text": "x"}])
+    client.run_turn = AsyncMock(return_value=("ses_1", SimpleNamespace()))
+    sent = [SimpleNamespace(id=78)]
+    calls = SimpleNamespace(
+        reply=AsyncMock(return_value=sent),
+        unreact=AsyncMock(),
+        activity=MagicMock(),
+    )
+    monkeypatch.setattr(bot.blocked, "channel", lambda channel: False)
+    monkeypatch.setattr(bot, "scope_of", lambda m: "guild:1")
+    monkeypatch.setattr(bot, "thinking_emoji", lambda guild: "⏳")
+    monkeypatch.setattr(bot, "react", AsyncMock())
+    monkeypatch.setattr(bot, "unreact", calls.unreact)
+    monkeypatch.setattr(bot, "reply_chunks", calls.reply)
+    monkeypatch.setattr(bot, "record_activity", calls.activity)
+    monkeypatch.setattr(bot.mentions, "who", lambda user: "Luka (@luka)")
+    monkeypatch.setattr(bot.mentions, "untag", AsyncMock(side_effect=lambda g, t: t))
+    monkeypatch.setattr(
+        bot, "parse", lambda state, session_id: bot.Answer(text, bot.context.Found())
+    )
+    monkeypatch.setattr(client, "open_thread", AsyncMock(return_value=None))
+    return msg, calls
+
+
+async def test_an_untagged_message_not_for_the_bot_gets_no_reply(client, monkeypatch):
+    msg, calls = answer_turn(client, monkeypatch, bot.NO_REPLY)
+    await client.on_message(msg)
+    calls.reply.assert_not_awaited()
+    calls.unreact.assert_awaited_once()
+    client.conversations.link.assert_called_once_with("ses_1", 77)
+    assert calls.activity.call_args.kwargs["reply"] == bot.NO_REPLY
+    assert calls.activity.call_args.kwargs["ok"] is True
+    assert client.build_content.await_args.kwargs["addressed"] is False
+
+
+async def test_an_untagged_message_for_the_bot_is_answered(client, monkeypatch):
+    msg, calls = answer_turn(client, monkeypatch, "Seveda!")
+    await client.on_message(msg)
+    calls.reply.assert_awaited_once()
+    client.conversations.link.assert_called_once_with("ses_1", 77, 78)
+
+
+async def test_a_tagged_message_is_answered_even_if_the_model_says_no_reply(
+    client, monkeypatch
+):
+    msg, calls = answer_turn(client, monkeypatch, bot.NO_REPLY, mentions=True)
+    await client.on_message(msg)
+    calls.reply.assert_awaited_once()
+    assert client.build_content.await_args.kwargs["addressed"] is True
